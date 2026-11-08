@@ -139,3 +139,5 @@ Result: **117 passed in 87.64 seconds** (older suite 50, native v2 suite 67),
 with no failures, skips or xfails. `git diff --check` also passed. No browser,
 application build, live executor tasks, paid work, network, commit or push was run
 for this reconciliation; all test Git operations used disposable local fixtures.
+
+> Note: paths in these notes (`tools/executor-queue/…`, `courses/scripts/tests/test_xq_skill.py`) are from the project where the skill was first developed; in this repo the skill is `skill/executor-queue/` and the tests are `tests/`.

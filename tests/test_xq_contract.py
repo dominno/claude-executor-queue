@@ -1,6 +1,6 @@
 """Offline contract tests for the user-level xq skill (never modifies that skill).
 
-Run: python3 -m pytest courses/scripts/tests/test_xq_skill.py -q -rx
+Run: python3 -m pytest tests/test_xq_contract.py -q
 Git commits/pushes below are fixture data, confined to tmp_path and a bare file
 remote. No project refs, executor queues, user Git config, or network are used.
 """
