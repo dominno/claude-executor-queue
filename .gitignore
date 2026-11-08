@@ -1,0 +1,4 @@
+__pycache__/
+.pytest_cache/
+.agents/ledger.jsonl
+.agents/*.lock
