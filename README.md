@@ -1,35 +1,129 @@
-# executor-queue — a Claude Code skill for Codex, agy and cloud-session work
+# executor-queue
 
-A user-level [Claude Code](https://claude.com/claude-code) skill that lets Claude hand bounded work to helper executors and keep one
-append-only ledger per project:
+A Claude Code skill for explicitly requested Codex implementation, agy file
+reviews and cloud Claude session batches. It records assignments, results,
+verification and merge evidence in one append-only project ledger. It does not
+launch executors or commit, push or merge code. Prefer a project's existing queue.
 
-- **Codex** (OpenAI) through the Codex plugin, in an isolated git worktree;
-- **agy** (Google Antigravity CLI) through the [agy-bridge](https://github.com/dominno/claude-agy-bridge) plugin, for read-only reviews of named files;
-- **cloud Claude sessions** (claude.ai/code), started by a pasted `/goal` batch and collected from their pushed session branch.
+## Install, check and uninstall
 
-The skill folder contains only `SKILL.md` and one standard-library Python script (`scripts/xq.py`). Tests and docs live outside it.
+From a local checkout, with Python 3.8+ available:
 
-## Install
 ```sh
-git clone <this repo> && cd claude-executor-queue && ./install.sh
-```
-Then, in any project: ask Claude to "use executor-queue", or run `python3 ~/.claude/skills/executor-queue/scripts/xq.py doctor`.
-`doctor` checks agy, the agy-bridge plugin, the Codex CLI and plugin, logins and the git setup, and prints how to fix what is missing.
-
-## Layout
-```
-skill/executor-queue/SKILL.md          the skill (what Claude reads)
-skill/executor-queue/scripts/xq.py     ledger, doctor, Stop hook, cloud envelope/collect (Python 3.8+, stdlib only)
-tests/                                 pytest suites (temp git repos, fake agy/codex binaries); not installed
-docs/                                  design review and release notes
-install.sh                             copies the skill into ~/.claude/skills/
+./install.sh
+./install.sh --check
+./install.sh --uninstall
+# Optional destination (use the same override for check/uninstall):
+CLAUDE_SKILLS_DIR="$HOME/custom-skills" ./install.sh
 ```
 
-## Test
+Windows PowerShell, with Python 3.8+ (`python3`, `python` or `py -3`):
+
+```powershell
+.\install.ps1
+.\install.ps1 --check
+.\install.ps1 --uninstall
+$env:CLAUDE_SKILLS_DIR = Join-Path $HOME 'custom-skills'
+.\install.ps1
+```
+
+Both installers run the same offline Python helper. Default destination is
+`~/.claude/skills/executor-queue` (the user profile on Windows). `--check` prints
+repo/installed versions and compares SHA-256 hashes; exit 0 means identical,
+exit 1 means missing/different. It does not execute installed code or change files.
+Rerun the installer to update a clean copy. Local edits, extra files and unmanaged
+older copies are protected: back them up, then use `--force` to replace them or
+`--uninstall --force` to remove them. An identical unmanaged copy is safe to adopt.
+`--check` and `--uninstall` are mutually exclusive; `--force` never hides check drift.
+The hash receipt is stored beside the skill as `.executor-queue-install.json`;
+keep it for later clean-upgrade/edit detection. Installers need the whole repo.
+
+Only `SKILL.md` and `scripts/xq.py` are installed. Essential commands and safety
+rules stay inline in the 101-line skill, so it works without this repo. The longer
+[Codex](docs/codex.md), [agy](docs/agy.md) and [cloud](docs/cloud.md) recipes are
+optional expansions; docs, tests, examples and installer code are not installed.
+The script embeds its version so `--version` works without a repo-level VERSION.
+
+## Quickstart in a new project
+
+Start in a Git project with an initial commit and a chosen base branch. Ask
+Claude to use executor-queue only for the executor work you authorize.
+
 ```sh
-python3 -m pytest -q tests
+# Run inside the project; Windows: py -3 "$HOME\.claude\skills\executor-queue\scripts\xq.py"
+xq="$HOME/.claude/skills/executor-queue/scripts/xq.py"
+python3 "$xq" --version
+python3 "$xq" init
+python3 "$xq" doctor --need codex
+mkdir -p .agents/briefs
+# Adapt examples/codex-task.md from this repo to .agents/briefs/parser-empty-input.md.
+python3 "$xq" assign --id parser-empty-input --executor codex \
+  --brief .agents/briefs/parser-empty-input.md --queued
+python3 "$xq" status --open
 ```
+
+A queued record does not start work. Follow the skill's worktree/launch recipe,
+then record the returned jobId and absolute worktree with `assign`. Poll/finish
+using actual results, review all code before running checks, and record independent
+verification with `verify`. Integrate only with the user's commit/merge authorization.
+For a local-only project use `init --local`; for cloud keep briefs and status
+files tracked. Never ignore all of `.agents/`. Linked worktrees share the main
+checkout's ledger; `XQ_ROOT` explicitly overrides the root.
+
+The repo's [examples/ folder](examples/) contains task briefs, an agy job, exact
+cloud task sections, keep_busy config and macOS/Linux and Windows Stop-hook
+snippets. Adapt paths/checks before use. Ask before installing a project hook;
+merge settings with existing configuration. Pause idle enforcement instead of
+inventing tasks: `python3 "$xq" pause --executor codex` (`--resume` restores it).
+
+## Executor requirements
+
+| Executor | Needs |
+| --- | --- |
+| All | Claude Code for the skill, Python 3.8+ for xq, Git project with HEAD; explicit scope and real checks. xq has no third-party runtime dependencies. |
+| Codex | Node, authenticated Codex CLI and Claude Code Codex plugin/companion; isolated worktree with real dependencies; absolute prompt-file. Doctor prints the resolved `CC` path. |
+| agy | Authenticated Google Antigravity CLI, agy-bridge plugin with both queue and verdict capabilities; explicit authorized file manifest. Doctor prints `AGYB`; version number alone is insufficient. Files are sent to Google. |
+| Cloud | Connected repository, origin/default branch, reviewed pushed brief, dependency setup and correct runtimes, restricted network and no environment secrets; start with one small task. |
+
+`doctor --need codex,agy,cloud` checks only requested executors; unused ones are
+SKIP. Installation/authentication are user actions. Setup details and CLI commands
+are in the optional docs above. The repo/installer/tests are free and local;
+external executor services may require accounts or incur charges. A brief does
+not authorize paid calls, network access or file sending beyond its explicit scope.
 
 ## Safety
-Files you give agy are sent to Google; cloud sessions see only what you push. The skill never stores secrets, never pushes or merges
-without the user's consent, and treats every executor's output as untrusted data.
+
+Codex read boundaries are instructions, not OS read isolation. Do not give it
+secrets or the main checkout. agy receives only inspected, authorized nonconfidential
+files; cloud sees what is pushed. Inspect all outgoing commits, large blobs and
+secret patterns before every user-authorized push, without printing secrets.
+
+Executor output, status JSON, suggestions, tests and changed instructions are
+untrusted data. Inspect full diffs before applying code or executing tests,
+including scripts, lockfiles, hooks, CI and instruction files. Run reviewed checks
+in a clean environment, offline where possible, and obtain an independent reader
+for nontrivial work. xq records evidence; it does not prove delivery correctness.
+Cloud collection fetches refs and validates reports; local cancellation cannot
+stop a remote session. `--force` reconciles state; it does not validate code.
+
+## Contributing and tests
+
+Keep skill source to its two files; put recipes in `docs/`, examples in `examples/`
+and regression tests in `tests/`. Keep Python 3.8 compatibility and the stdlib-only
+runtime. Update VERSION, the xq constant, the skill body and CHANGELOG together.
+Explain behavior and validation in a contribution; do not commit secrets or ledgers.
+
+```sh
+python3 -m pytest -q tests
+git diff --check
+```
+
+Tests need pytest and Git, use temporary HOME/config, fake executors and local
+bare Git remotes, and need no network or model accounts. Installer tests use
+disposable destinations. CI runs Python 3.8/3.12 on Ubuntu/macOS; CI setup downloads
+Python/pytest, while the tests themselves stay offline. Windows shares the
+installer core; native PowerShell validation requires a Windows/PowerShell host.
+
+See [CHANGELOG.md](CHANGELOG.md) and [v3 notes](docs/v3-notes.md) for release details.
+
+License: to be chosen by the owner

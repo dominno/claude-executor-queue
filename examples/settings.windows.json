@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py -3 \"%USERPROFILE%\\.claude\\skills\\executor-queue\\scripts\\xq.py\" hook"
+          }
+        ]
+      }
+    ]
+  }
+}

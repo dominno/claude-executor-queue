@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 
+VERSION = '3.0.0'
+
 EXECUTORS = ('codex', 'agy', 'cloud')
 STATUS_DIR = '.agents/cloud-status'
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
@@ -722,6 +724,7 @@ def cmd_cloud_collect(a):
 
 def main():
     p = argparse.ArgumentParser(prog='xq', description=__doc__)
+    p.add_argument('--version', action='version', version='%(prog)s ' + VERSION)
     sub = p.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('doctor'); s.add_argument('--need', default='codex,agy,cloud'); s.set_defaults(fn=doctor)
     s = sub.add_parser('init'); s.add_argument('--local', action='store_true'); s.set_defaults(fn=cmd_init)

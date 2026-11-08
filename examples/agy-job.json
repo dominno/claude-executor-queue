@@ -1,0 +1,9 @@
+{
+  "name": "review-parser-01",
+  "task": "Review the named parser and tests for empty-input handling. Cite evidence; do not request additional files.",
+  "files": ["src/parser.py", "tests/test_parser.py"],
+  "timeout": "5m",
+  "cite": true,
+  "context": false,
+  "need": false
+}
