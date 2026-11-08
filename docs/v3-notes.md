@@ -72,3 +72,47 @@ not executed on Windows. Its shared Python implementation is covered by the POSI
 integration suite. Python 3.8 and Linux runtime checks are defined in CI and were
 not run locally. External authentication, real executor APIs and cloud hosting
 are outside this offline validation.
+
+## Code review fixes
+
+All 10 numbered and 5 smaller findings in `code-review-2026-11-08.md` have
+regressions in `tests/test_xq.py`. Each new regression was run against the broken
+behavior first, observed failing, then rerun green after its fix. Existing test
+assertions were left intact. No dependencies were added; xq remains stdlib-only
+with Python 3.8 syntax and timestamp parsing that does not depend on newer
+`fromisoformat` behavior.
+
+| Finding | Regression test(s) | Fix |
+| --- | --- | --- |
+| 1: unrelated unbound cloud assignments block collection | `test_review_01_collect_ignores_unbound_other_batch` | Scope missing reports and progress to collected branches, seen tasks, and explicitly selected or represented batches. Unreported peers in the same batch still block atomic import. |
+| 2: reprint of a plain cloud assignment crashes | `test_review_02_reprint_plain_cloud_assignment_has_clean_error` | Require recorded envelope base/brief before accessing them; report a clean error without appending. |
+| 3: duplicate ID with only forced verify/merge crashes | `test_review_03_envelope_refuses_id_with_only_forced_event` | Use a safe status lookup and reject the reused ID atomically. |
+| 4: reassignment hides an unverified finish | `test_review_04_unverified_attempt_requires_force_and_preserves_history` | Refuse done/failed/blocked unverified reassignment unless `assign --force`; retain earlier attempt events in the append-only ledger. |
+| 5: queued agy results are ignored | `test_review_05_sync_queued_agy_results` | Sync running and queued assignments via agy-sync/poll; leave pending jobs queued and repeated sync idempotent. |
+| 6: doctor aborts or checks ignores in the wrong directory | `test_review_06_doctor_reports_missing_default_branch`, `test_review_06_doctor_checks_ignores_from_root` | Report MISSING default branch and continue; run root-relative ignore/tracked-output checks from the repo root. |
+| 7: Git ignores XQ_ROOT | `test_review_07_xq_root_controls_git_from_unrelated_cwd`, `test_review_07_linked_worktree_uses_primary_checkout_git` | Pass the selected root through branch/default/fetch/ancestry/report helpers and all Git calls after root discovery. |
+| 8: resolving a brief masks symlinks | `test_review_08_envelope_refuses_symlinked_brief` | Check the supplied path and its parent components for symlinks before resolving. |
+| 9: collection repeats ledger parsing and sensitive diffs | `test_review_09_collect_parses_ledger_once`, `test_review_09_collect_caches_sensitive_diff_per_base_ref` | Reuse the initial state, apply successful imports to summary state, cache diffs by `(base, ref)`, and print each sensitive-path warning once. Tests count ledger parses for successful/failed imports and diff calls across shared/distinct bases. |
+| 10: append reads the ledger and fsyncs empty batches | `test_review_10_empty_append_does_no_io`, `test_review_10_append_reads_only_last_byte_and_recovers_partial_line` | Return before locking or file I/O for empty lists/iterators; use a binary end-minus-one seek and one-byte read for nonempty ledgers. Tests preserve Unicode and partial-line recovery while checking actual I/O. |
+| Smaller 1: open status hides fixes/reject | `test_review_small_01_open_status_keeps_unresolved_verdicts` | Keep unresolved verdicts visible; completed pass tasks retain the existing closed behavior. |
+| Smaller 2: timestamps fail on Python 3.8–3.10 | `test_review_small_02_iso_timestamps_on_python38` | Share a strptime-based zoned ISO parser between report validation and staleness checks, supporting Z/offsets, basic/calendar/week dates, comma and arbitrary-length fractions (microsecond precision). Tests emulate the older fromisoformat restrictions. |
+| Smaller 3: retained_exit_code is treated as delivery failure | `test_review_small_03_agy_retained_exit_is_diagnostic`, `test_review_small_03_agy_retained_exit_alone_is_not_delivery` | Use actual top-level exit_code for delivery; retained diagnostics alone cannot establish delivery. Unsafe attempt exits and omitted-file checks remain enforced. |
+| Smaller 4: merge can be recorded twice | `test_review_small_04_duplicate_merge_requires_force` | Refuse an already merged task before appending unless explicit `--force` reconciliation. |
+| Smaller 5: step-2 root snippet selects a linked worktree | `test_review_small_05_root_snippet_resolves_primary_checkout` | Use the parent of the absolute Git common directory in SKILL.md and the step-2 recipe now located in docs/codex.md. Execute both snippets from inside a linked worktree in the regression. |
+
+Targeted red/green checks used the existing local pytest installation without
+downloads. Full-suite validation uses the same offline command documented above;
+fixture Git commits/pushes target temporary local bare remotes only. No worktree
+commit/push or live executor/network call was performed. Both pre-existing
+untracked `.agents-brief-*.md` files were left unchanged.
+
+Full validation: **175 passed in 119.18s**, including all 135 existing cases and
+40 new regression cases; no failures, skips, or xfails. Command:
+
+```sh
+PYTHONPATH=/usr/local/lib/python3.9/site-packages PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest -q tests
+```
+
+Python 3.8 syntax/stdlib checks and SKILL.md's length limit passed in that suite;
+older timestamp parsing behavior is emulated by the new regression. No Python
+3.8 runtime was available locally. `git diff --check` also passed.

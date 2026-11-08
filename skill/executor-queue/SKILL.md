@@ -35,7 +35,9 @@ Record actual results: `xq.py finish --id <id> --status done|failed|blocked --su
 ## Codex
 
 Discover the default branch with `git symbolic-ref --short refs/remotes/origin/HEAD`; choose explicitly if absent.
-Set `root` to the absolute primary checkout, `base` to the chosen branch, `wt` to a fresh absolute sibling path.
+Set the primary checkout (also from a linked worktree):
+`root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")`
+Set `base` to the chosen branch and `wt` to a fresh absolute sibling path; for bare/separate git dirs set `root` explicitly.
 `git -C "$root" worktree add -b xq/<id> "$wt" "$base"`; prepare real dependencies as authorized, never symlink them.
 Launch: `node "$CC" task --background --write --cwd "$wt" --effort medium --prompt-file "$root/.agents/briefs/<id>.md"`.
 Immediately record: `xq.py assign --id <id> --executor codex --brief .agents/briefs/<id>.md --job <jobId> --worktree "$wt"`.
@@ -89,7 +91,8 @@ Get an independent reader for nontrivial work. `xq.py verify --id <id> --by <rea
 Before authorized integration inspect committed AND uncommitted changes, allowed paths, artifacts and symlinks.
 With user commit/merge authorization: stage named files, commit in worktree, merge accepted work `--no-ff` from clean primary,
 then `xq.py merge --id <id> --commit "$(git rev-parse HEAD)"` using the resulting merge SHA; preserve results and clean worktrees.
-Finish/verify/merge enforce order; `--force` is explicit reconciliation, never delivery validation.
+Assign refuses unverified finished work; `assign --force` starts a new attempt and keeps previous ledger events.
+Finish/verify/merge enforce order (including duplicate merges); `--force` is explicit reconciliation, never delivery validation.
 
 ## Optional Stop hook
 

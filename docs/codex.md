@@ -39,7 +39,7 @@ No executor receives permission for paid calls, network, push or merge merely by
    Tools and results needed later belong in tracked paths, not temporary folders.
 2. Prepare Codex's worktree from the discovered default branch (if origin/HEAD is absent, set it or choose a base explicitly):
    ```sh
-   root=$(git rev-parse --show-toplevel)
+   root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
    base=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's#origin/##')
    wt="$(dirname "$root")/$(basename "$root")-wt/<id>"
    git -C "$root" worktree add -b xq/<id> "$wt" "$base"

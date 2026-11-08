@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -552,3 +553,352 @@ def test_cloud_envelope_refuses_reused_failed_id(q):
     with pytest.raises(SystemExit, match='new id'):
         q.envelope('a')
     assert q.xq.events(q.repo) == before
+
+
+@pytest.mark.parametrize('other_batch', [None, 'outstanding'])
+def test_review_01_collect_ignores_unbound_other_batch(q, capsys, other_batch):
+    q.envelope('a')  # The actual session branch is not known until collection.
+    q.xq.append(q.repo, dict(event='assign', id='other', executor='cloud',
+                             base=q.base, batch=other_batch))
+    q.publish({'a': q.report()})
+    capsys.readouterr()
+    assert q.collect() == 0
+    output = capsys.readouterr().out
+    assert 'MISSING' not in output
+    assert 'cloud progress: done 1\n' in output
+    tasks = q.xq.state(q.repo)
+    assert tasks['a']['status'] == 'done'
+    assert tasks['other']['status'] == 'running'
+
+
+def test_review_02_reprint_plain_cloud_assignment_has_clean_error(q):
+    q.assign('a', 'cloud')
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='envelope|pinned base'):
+        q.envelope('a', **{'--reprint': True})
+    assert q.xq.events(q.repo) == before
+
+
+@pytest.mark.parametrize('event', ['verify', 'merge'])
+def test_review_03_envelope_refuses_id_with_only_forced_event(q, event):
+    if event == 'verify':
+        q.cli('verify', '--id', 'a', '--by', 'reader', '--verdict', 'pass',
+              '--evidence', 'reconciled', '--force')
+    else:
+        q.cli('merge', '--id', 'a', '--commit', q.base, '--force')
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='already.*new id'):
+        q.envelope('b', 'a')
+    assert q.xq.events(q.repo) == before
+
+
+@pytest.mark.parametrize('status', ['done', 'failed', 'blocked'])
+def test_review_04_unverified_attempt_requires_force_and_preserves_history(q, capsys, status):
+    q.assign()
+    finish(q, status=status)
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='unverified|not verified'):
+        q.assign()
+    assert q.xq.events(q.repo) == before
+    assert q.cli('hook') == 2
+    assert 'finished but not verified: local' in capsys.readouterr().err
+    assert q.assign('local', 'codex', '--force') == 0
+    assert q.xq.events(q.repo)[:len(before)] == before
+    assert q.xq.state(q.repo)['local']['attempt'] == 2
+    assert q.xq.state(q.repo)['local']['status'] == 'running'
+
+
+@pytest.mark.parametrize('command', ['agy-sync', 'poll'])
+def test_review_05_sync_queued_agy_results(q, command):
+    q.assign('local', 'agy', '--queued')
+    q.assign('waiting', 'agy', '--queued')
+    result = q.repo / '.agy-bridge/results/local.md'
+    result.parent.mkdir(parents=True)
+    result.write_text('exit_code: 0\nretained_exit_code: 0\n\n## Answer\nDelivered')
+    assert q.cli(command) == 0
+    tasks = q.xq.state(q.repo)
+    assert tasks['local']['status'] == 'done'
+    assert not tasks['local'].get('verdict')
+    assert tasks['waiting']['status'] == 'queued'
+    before = q.xq.events(q.repo)
+    assert q.cli(command) == 0
+    assert q.xq.events(q.repo) == before
+
+
+def test_review_06_doctor_reports_missing_default_branch(q, capsys):
+    q.git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+    q.git('checkout', '--detach')
+    assert q.cli('doctor', '--need', 'cloud') == 1
+    output = capsys.readouterr().out
+    assert 'MISSING default branch:' in output
+    assert 'OK origin:' in output  # Diagnostics continue after the missing branch.
+
+
+@pytest.mark.parametrize('need,probe', [
+    ('cloud', '.agents/briefs/probe.md'), ('agy', '.agy-bridge/probe'),
+])
+def test_review_06_doctor_checks_ignores_from_root(q, capsys, monkeypatch, need, probe):
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind: '/fake/agy-bridge')
+    monkeypatch.setattr(q.xq.shutil, 'which', lambda name: '/fake/' + name)
+    original = q.xq.run
+
+    def fake_tools(argv, **kwargs):
+        if argv[0] in ('agy', '/fake/agy-bridge'):
+            return subprocess.CompletedProcess(argv, 0, '', '')
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(q.xq, 'run', fake_tools)
+    if need == 'cloud':
+        with (q.repo / '.git/info/exclude').open('a') as fh:
+            fh.write('/.agents/briefs/\n')
+    else:
+        (q.repo / '.gitignore').write_text('/.agy-bridge/\n')
+    nested = q.repo / 'nested'
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    assert q.cli('doctor', '--need', need) == (1 if need == 'cloud' else 0)
+    output = capsys.readouterr().out
+    assert ('MISSING ' + probe if need == 'cloud' else 'OK .agy-bridge ignored:') in output
+
+
+def test_review_07_xq_root_controls_git_from_unrelated_cwd(q, monkeypatch, capsys):
+    outside = q.tmp_path / 'outside'
+    outside.mkdir()
+    monkeypatch.setenv('XQ_ROOT', str(q.repo))
+    monkeypatch.chdir(outside)
+    calls = []
+    original = q.xq.run
+
+    def record_git(argv, **kwargs):
+        if argv[0] == 'git':
+            calls.append((argv, kwargs.get('cwd')))
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(q.xq, 'run', record_git)
+    assert q.cli('init') == 0
+    assert q.cli('doctor', '--need', 'cloud') == 0
+    assert 'default branch: main' in capsys.readouterr().out
+    assert q.envelope('a', **{'--branch': 'claude/test'}) == 0
+    # Fixture publishing uses its own git helper in the temporary repo.
+    monkeypatch.chdir(q.repo)
+    q.publish({'a': q.report()}, {'AGENTS.md': 'untrusted change'})
+    monkeypatch.chdir(outside)
+    assert q.cli('cloud-collect', '--discover') == 0
+    assert 'SENSITIVE AGENTS.md' in capsys.readouterr().out
+    assert q.xq.state(q.repo)['a']['status'] == 'done'
+    verify(q, 'a')
+    assert q.cli('merge', '--id', 'a', '--commit', q.base) == 0
+    assert calls
+    assert all(cwd == q.repo for argv, cwd in calls), calls
+
+
+def test_review_07_linked_worktree_uses_primary_checkout_git(q, monkeypatch):
+    wt = q.tmp_path / 'linked'
+    q.git('worktree', 'add', '--detach', str(wt))
+    q.git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+    monkeypatch.chdir(wt)
+    # Fallback HEAD must be the primary checkout's branch, not detached wt HEAD.
+    assert q.envelope() == 0
+    assert q.xq.state(q.repo)['a']['main'] == 'main'
+
+
+@pytest.mark.parametrize('kind', ['file', 'parent'])
+def test_review_08_envelope_refuses_symlinked_brief(q, kind):
+    if kind == 'file':
+        link = q.repo / '.agents/briefs/link.md'
+        link.symlink_to(q.repo / q.brief)
+    else:
+        directory = q.repo / 'linked-briefs'
+        directory.symlink_to(q.repo / '.agents/briefs', target_is_directory=True)
+        link = directory / 'batch.md'
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='unsafe|symlink'):
+        q.cli('cloud-envelope', '--brief', str(link.relative_to(q.repo)), '--tasks', 'a')
+    assert q.xq.events(q.repo) == before
+
+
+@pytest.mark.parametrize('bad_report', [False, True])
+def test_review_09_collect_parses_ledger_once(q, monkeypatch, capsys, bad_report):
+    q.envelope('a', 'b')
+    q.publish({'a': q.report(), 'b': q.report('b', **({'utc': 'invalid'} if bad_report else {}))})
+    original = q.xq.events
+    reads = []
+
+    def counted_events(root):
+        reads.append(root)
+        return original(root)
+
+    monkeypatch.setattr(q.xq, 'events', counted_events)
+    capsys.readouterr()
+    assert q.collect() == int(bad_report)
+    assert reads == [q.repo]
+    assert ('cloud progress: running 2' if bad_report else 'cloud progress: done 2') in capsys.readouterr().out
+
+
+def test_review_09_collect_caches_sensitive_diff_per_base_ref(q, monkeypatch, capsys):
+    q.envelope('a', 'b')
+    # A third task has a distinct base: it needs its own diff.
+    (q.repo / 'new-base').write_text('x')
+    q.git('add', 'new-base')
+    q.git('commit', '-m', 'second base fixture')
+    newer = q.git('rev-parse', 'HEAD')
+    q.xq.append(q.repo, dict(event='assign', id='c', executor='cloud', base=newer, batch='batch'))
+    q.publish({'a': q.report(), 'b': q.report('b'), 'c': q.report('c', base=newer, head=newer)},
+              {'AGENTS.md': 'untrusted', '.claude/settings.json': '{}', q.brief: 'changed brief'})
+    original = q.xq.git
+    diffs = []
+
+    def count_diffs(*args, **kwargs):
+        if args[0] == 'diff':
+            diffs.append(args[3:5])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(q.xq, 'git', count_diffs)
+    capsys.readouterr()
+    assert q.collect() == 0
+    assert sorted(base for base, ref in diffs) == sorted([q.base, newer])
+    output = capsys.readouterr().out
+    assert output.count('SENSITIVE AGENTS.md ') == 1
+    assert output.count('SENSITIVE .claude/settings.json ') == 1
+    assert output.count('SENSITIVE ' + q.brief + ' ') == 1
+
+
+@pytest.mark.parametrize('rows', [[], iter(())])
+def test_review_10_empty_append_does_no_io(q, monkeypatch, rows):
+    def unexpected(*args, **kwargs):
+        pytest.fail('empty append must not lock, open/read/write, or fsync')
+
+    monkeypatch.setattr(q.xq, 'ledger_lock', unexpected)
+    monkeypatch.setattr(Path, 'open', unexpected)
+    monkeypatch.setattr(q.xq.os, 'fsync', unexpected)
+    q.xq.append_many(q.repo, rows)
+
+
+@pytest.mark.parametrize('ending', [b'', b'\n'])
+def test_review_10_append_reads_only_last_byte_and_recovers_partial_line(q, monkeypatch, ending):
+    path = q.xq.ledger_path(q.repo)
+    previous = ('{"id":"old","summary":"' + 'ż' * 65536 + '"}').encode('utf-8') + ending
+    path.write_bytes(previous)
+    original_open = Path.open
+    reads, seeks = [], []
+
+    class TrackedFile:
+        def __init__(self, fh):
+            self.fh = fh
+
+        def __enter__(self):
+            self.fh.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.fh.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.fh, name)
+
+        def read(self, size=-1):
+            reads.append(size)
+            return self.fh.read(size)
+
+        def seek(self, offset, whence=0):
+            seeks.append((offset, whence))
+            return self.fh.seek(offset, whence)
+
+    def tracked_open(p, *args, **kwargs):
+        fh = original_open(p, *args, **kwargs)
+        return TrackedFile(fh) if p == path else fh
+
+    monkeypatch.setattr(Path, 'open', tracked_open)
+    q.xq.append_many(q.repo, [dict(event='finish', id='new', summary='zażółć')])
+    assert reads == [1]
+    assert (-1, os.SEEK_END) in seeks
+    with original_open(path, 'rb') as fh:
+        contents = fh.read()
+    assert contents.startswith(previous + (b'' if ending else b'\n'))
+    assert json.loads(contents.splitlines()[-1])['summary'] == 'zażółć'
+
+
+@pytest.mark.parametrize('verdict', ['fixes', 'reject'])
+def test_review_small_01_open_status_keeps_unresolved_verdicts(q, capsys, verdict):
+    q.assign()
+    finish(q)
+    verify(q, verdict=verdict)
+    assert q.cli('status', '--open') == 0
+    output = capsys.readouterr().out
+    assert 'local' in output and verdict in output
+
+
+@pytest.mark.parametrize('utc', [
+    '2026-11-08T21:00:00Z', '2026-11-08T21:00:00.123456789+00:00',
+    '20261108T210000Z', '20261108T210000.123Z',
+    '2026-11-08T21:00:00,123Z', '2026-W45-7T21:00:00Z',
+])
+def test_review_small_02_iso_timestamps_on_python38(q, monkeypatch, utc):
+    real_datetime = q.xq.datetime.datetime
+
+    class Python38Datetime(real_datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            # Older CPython only accepted extended calendar dates and dot fractions.
+            if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3}|\.\d{6})?\+00:00', value):
+                raise ValueError('unsupported by Python 3.8 fromisoformat')
+            return super().fromisoformat(value)
+
+    monkeypatch.setattr(q.xq.datetime, 'datetime', Python38Datetime)
+    report = q.report(utc=utc)
+    assert q.xq.validate_report(report, 'a', {'base': q.base}, q.base, q.repo) == []
+    # A future assignment must not be marked stale because parsing failed.
+    future = utc.replace('2026', '2099')
+    assert q.xq.stale({'status': 'running', 'assigned': future}, 4) is False
+
+
+@pytest.mark.parametrize('retained', [10, 15, 16, 17])
+def test_review_small_03_agy_retained_exit_is_diagnostic(q, retained):
+    q.assign('local', 'agy')
+    result = q.repo / '.agy-bridge/results/local.md'
+    result.parent.mkdir(parents=True)
+    result.write_text('exit_code: 0\nretained_exit_code: ' + str(retained) +
+                      '\n\n## Answer\nDelivered')
+    assert q.cli('agy-sync') == 0
+    assert q.xq.state(q.repo)['local']['status'] == 'done'
+    assert not q.xq.state(q.repo)['local'].get('verdict')
+
+
+def test_review_small_03_agy_retained_exit_alone_is_not_delivery(q, capsys):
+    q.assign('local', 'agy')
+    result = q.repo / '.agy-bridge/results/local.md'
+    result.parent.mkdir(parents=True)
+    result.write_text('retained_exit_code: 0\n\n## Answer\nClaims success')
+    assert q.cli('agy-sync') == 1
+    assert 'missing bridge exit header' in capsys.readouterr().out
+    assert q.xq.state(q.repo)['local']['status'] == 'running'
+
+
+def test_review_small_04_duplicate_merge_requires_force(q):
+    q.assign()
+    finish(q)
+    verify(q)
+    assert q.cli('merge', '--id', 'local', '--commit', q.base) == 0
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='already merged'):
+        q.cli('merge', '--id', 'local', '--commit', q.base)
+    assert q.xq.events(q.repo) == before
+    assert q.cli('merge', '--id', 'local', '--commit', q.base, '--force') == 0
+    assert q.xq.events(q.repo)[:len(before)] == before
+    assert len(q.xq.events(q.repo)) == len(before) + 1
+
+
+@pytest.mark.parametrize('source', ['skill/executor-queue/SKILL.md', 'docs/codex.md'])
+def test_review_small_05_root_snippet_resolves_primary_checkout(q, source):
+    wt = q.tmp_path / 'linked worktree'
+    q.git('worktree', 'add', '--detach', str(wt))
+    nested = wt / 'nested'
+    nested.mkdir()
+    text = (SCRIPT.parents[3] / source).read_text()
+    lines = [line.strip().strip('`') for line in text.splitlines()
+             if line.strip().startswith(('root=', '`root='))]
+    assert len(lines) == 1, 'provide an executable primary-checkout root assignment'
+    result = subprocess.run(['sh', '-c', lines[0] + '\nprintf "%s\\n" "$root"'],
+                            cwd=str(nested), capture_output=True, text=True, check=True, timeout=10)
+    assert Path(result.stdout.strip()) == q.repo
+    assert (Path(result.stdout.strip()) / q.brief).is_file()
