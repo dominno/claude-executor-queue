@@ -2,7 +2,7 @@
 
 ## Summary
 
-The council reviewed the skill through five lenses: first-use, correctness, cloud, security, portability and ops. Lenses filed 31 findings, and each one went to a separate verifier. After duplicates were merged, **25 confirmed findings** remain: **0 blockers, 16 important, 9 nice**. One finding was refuted. The verifiers lowered every severity that critics had marked as a blocker.
+The council reviewed the skill through five lenses: first-use, correctness, cloud, security, portability and ops. Lenses filed 31 findings, and each one went to a separate verifier. After duplicates were merged, **24 confirmed findings** remain: **0 blockers, 16 important, 8 nice**. One finding was refuted. The verifiers lowered every severity that critics had marked as a blocker.
 
 The most serious gaps are these:
 

@@ -999,7 +999,7 @@ def test_council_03_discover_skips_foreign(q, capsys):
     q.envelope()
     council_publish(q, {'orphan': {}}, branch='claude/foreign')
     council_publish(q, {'a': {}})
-    q.git('push', 'origin', q.base + ':refs/heads/feature/claude/x')
+    council_publish(q, {'a': {'summary': 'outside the claude namespace'}}, branch='feature/claude/x')
     assert q.cli('cloud-collect', '--discover', '--batch', 'batch') == 0
     assert 'SKIP foreign orphan' in capsys.readouterr().out
     assert q.xq.state(q.repo)['a']['status'] == 'done'
@@ -1107,6 +1107,7 @@ def test_council_11_unicode_line_separators(q):
 
 
 def test_council_12_network_git_timeout_and_prompt(q, monkeypatch):
+    monkeypatch.delenv('GIT_TERMINAL_PROMPT', raising=False)
     calls = []
     def fake(argv, **kw):
         calls.append((argv, kw))
@@ -1114,6 +1115,7 @@ def test_council_12_network_git_timeout_and_prompt(q, monkeypatch):
     monkeypatch.setattr(q.xq.subprocess, 'run', fake)
     q.xq.git('fetch', 'origin', 'main', cwd=q.repo)
     q.xq.git('ls-remote', '--heads', 'origin', cwd=q.repo)
+    assert [argv[1] for argv, kw in calls] == ['fetch', 'ls-remote']
     assert all(kw['timeout'] is None and kw['env']['GIT_TERMINAL_PROMPT'] == '0' for argv, kw in calls)
 
 
@@ -1194,6 +1196,21 @@ def test_council_18_automatic_private_exclusions(q):
     assert subprocess.run(['git', 'check-ignore', '-q', '.agents/config.json']).returncode == 1
 
 
+@pytest.mark.parametrize('command', ['init', 'assign'])
+def test_council_18_tracked_private_state_refused(q, command):
+    ledger = q.repo / '.agents/ledger.jsonl'
+    ledger.write_text('', encoding='utf-8')
+    q.git('add', '--force', '.agents/ledger.jsonl')
+    assert q.git('ls-files', '--', '.agents/ledger.jsonl') == '.agents/ledger.jsonl'
+    before = ledger.read_bytes()
+    with pytest.raises(SystemExit, match='private state is tracked'):
+        if command == 'init':
+            q.cli('init')
+        else:
+            q.assign()
+    assert ledger.read_bytes() == before
+
+
 @pytest.mark.parametrize('name', ['ledger.jsonl', 'ledger.lock', 'config.json', 'config.tmp', 'config.json.tmp'])
 def test_council_19_state_symlinks_refused(q, name):
     victim = q.tmp_path / 'victim'; victim.write_text('{}')
@@ -1249,6 +1266,19 @@ def test_council_23_casefold_ids_and_exact_results(q):
     (folder / 'review1.md').write_text('exit_code: 0\n## Answer\nresult')
     q.cli('agy-sync')
     assert q.xq.state(q.repo)['Review1']['status'] == 'running'
+
+
+def test_council_23_envelope_casefold_ids_refused(q, capsys):
+    brief = q.repo / q.brief
+    brief.write_text(brief.read_text(encoding='utf-8') + '\n## A\nCase-colliding task.\n', encoding='utf-8')
+    q.git('add', q.brief)
+    q.git('commit', '-m', 'add case-colliding brief heading')
+    q.git('push', 'origin', 'main')
+    assert q.xq.state(q.repo) == {}
+    with pytest.raises(SystemExit, match='task id case collision'):
+        q.envelope('a', 'A')
+    assert q.xq.events(q.repo) == []
+    assert '/goal' not in capsys.readouterr().out
 
 
 def test_council_24_queued_agy_promotion_and_idle(q):
