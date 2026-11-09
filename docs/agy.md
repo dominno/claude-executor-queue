@@ -1,19 +1,31 @@
 # agy review recipes
 
-Use `xq.py doctor --need agy` first; see `codex.md` for plugin setup details.
+Use `xq.py init`, then `xq.py doctor --need agy`; see `codex.md` for plugin setup details.
 `xq.py` means the installed helper; `$root` is the absolute primary checkout,
 `$wt` its review worktree and `$base` the explicitly selected base branch.
 
 
 Use the resolved `"$AGYB"` in every CLI invocation. Start with `/agy:dry-run` and read the manifest for **each new file set**.
 Before delegate or queue add, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`
-(and promote any queued assignment before adding the bridge job). Existing bridge names/artifacts refuse assignment; use a new id.
+(a queued assignment can be promoted after its matching pending job exists). Existing bridge names/artifacts refuse assignment; use a new id.
 For a single review: `"$AGYB" delegate --repo "$root" --file A --file B --out .agy-bridge/results/<id>.md --cite -- '<task>'`.
 agy cannot search unseen files. No confidential data, `.env`, credentials, `.claude/` or user media.
 
 The bridge refuses worktree roots and out-of-repo inputs. For worktree review, export a diff inside the primary repo:
-`git -C "$wt" diff "$base" > "$root/.agents/review/<id>.diff"`, then delegate that file with `--repo "$root"`.
-Read the exported diff locally before sending it.
+```sh
+mkdir -p "$root/.agents/review"
+git -C "$wt" add -N .
+git -C "$wt" diff "$base" > "$root/.agents/review/<id>.diff"
+git -C "$wt" status --porcelain
+```
+Compare every changed/untracked path in status with the diff before delegating with `--repo "$root"`.
+Inspect the diff locally, including newly created files. Binary files need explicitly named review inputs;
+ignored files are omitted and need separate inspection if in scope. `add -N` records intent only in this worktree.
+Review exports are local and git-excluded automatically.
+
+On Windows PowerShell doctor prints `$AGYB='...'` with escaped quotes. Use
+`py -3 "$AGYB" queue --help` (and `py -3 "$AGYB"` before the commands below), since
+an extensionless Python bridge is not a native executable. Doctor resolves the full agy/agy.cmd path.
 
 Queue job schema (name must equal xq id and be unique across pending/archive/results):
 ```json

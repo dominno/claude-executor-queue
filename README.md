@@ -17,7 +17,7 @@ From a local checkout, with Python 3.8+ available:
 CLAUDE_SKILLS_DIR="$HOME/custom-skills" ./install.sh
 ```
 
-Windows PowerShell, with Python 3.8+ (`python3`, `python` or `py -3`):
+Windows PowerShell, with Python 3.8+ (`py -3`, `python` or `python3`):
 
 ```powershell
 .\install.ps1
@@ -39,7 +39,7 @@ The hash receipt is stored beside the skill as `.executor-queue-install.json`;
 keep it for later clean-upgrade/edit detection. Installers need the whole repo.
 
 Only `SKILL.md` and `scripts/xq.py` are installed. Essential commands and safety
-rules stay inline in the 101-line skill, so it works without this repo. The longer
+rules stay inline in the compact skill, so it works without this repo. The longer
 [Codex](docs/codex.md), [agy](docs/agy.md) and [cloud](docs/cloud.md) recipes are
 optional expansions; docs, tests, examples and installer code are not installed.
 The script embeds its version so `--version` works without a repo-level VERSION.
@@ -120,10 +120,23 @@ git diff --check
 
 Tests need pytest and Git, use temporary HOME/config, fake executors and local
 bare Git remotes, and need no network or model accounts. Installer tests use
-disposable destinations. CI runs Python 3.8/3.12 on Ubuntu/macOS; CI setup downloads
+disposable destinations. CI is configured for Python 3.8/3.12 on Ubuntu/macOS/Windows; CI setup downloads
 Python/pytest, while the tests themselves stay offline. Windows shares the
 installer core; native PowerShell validation requires a Windows/PowerShell host.
 
-See [CHANGELOG.md](CHANGELOG.md) and [v3 notes](docs/v3-notes.md) for release details.
+See [CHANGELOG.md](CHANGELOG.md) and [v3.1 notes](docs/v3.1-notes.md) for release details.
 
 License: to be chosen by the owner
+
+Version 3.1.0 binds verification to the delivered head and a different reader. New finishes clear prior
+approval and merge records. Merge records require head ancestry and default-branch reachability;
+`--force` reconciliations remain explicit ledger events. Passed Codex/cloud work stays open until merged.
+Use `close --id X --reason superseded-by:X-fix1`, `dropped` or `rejected` to retire work; work that ran needs
+verification first. `poll` refreshes live job heartbeats, `ack --id X --hours 12` acknowledges long work,
+and pause suppresses stale/idle enforcement. Never close or acknowledge work without checking its state.
+
+Local ledger, lock, review exports and config temp files are automatically excluded before writes;
+doctor checks exclusions. `.agents/config.json` is trackable policy: review it before committing it.
+Use the guarded hook examples (Windows hooks run in Git Bash). Missing user-level installs in cloud
+clones no longer block Stop. Uninstall warns about project hooks. Upgrades stage and rename the old/new
+payload, rolling back publication failures; the guarded hook tolerates the brief rename gap.

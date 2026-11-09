@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1 — 3.1.0 — 2026-11-09
+
+- Address every confirmed council-table row (16 important, 8 actual nice rows; report summary overcounts by one).
+- Invalidate stale approvals, pin verified heads, enforce different readers and validate integration ancestry.
+- Isolate cloud collection per batch; diagnose branch conflicts and strengthen pinned-base/task provenance and sensitive-path warnings.
+- Add heartbeat/ack and explicit close; fix queued agy promotion and complete worktree review exports.
+- Protect local state exclusions and symlink writes; guard missing-install hooks and stage upgrade swaps with rollback.
+- Harden Windows locking, UTF-8 output, bridge launch and PowerShell Python detection; add Windows CI configuration.
+- Keep the installed payload to two stdlib/Python 3.8+ files. See docs/v3.1-notes.md for per-finding regressions and validation limits.
+
 ## v3 — 3.0.0 — 2026-11-08
 
 - Add repo/CLI/skill version markers and release history.

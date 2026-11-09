@@ -77,7 +77,7 @@ def queue(xq, tmp_path, monkeypatch):
         monkeypatch.setattr(sys, 'argv', [str(SCRIPT), *args])
         return xq.main()
 
-    def envelope(*ids, path=brief, branch='session/test'):
+    def envelope(*ids, path=brief, branch='claude/test'):
         return cli('cloud-envelope', '--brief', path, '--tasks', *ids, '--branch', branch)
 
     def status(task='c001'):
@@ -85,8 +85,17 @@ def queue(xq, tmp_path, monkeypatch):
                     tests=[{'cmd': 'pytest', 'result': 'pass'}], head=base,
                     base=base, utc='2026-11-08T21:00:00Z')
 
-    def publish(files, branch='session/test'):
+    def publish(files, branch='claude/test'):
         git('checkout', '-B', branch, 'main')
+        for tid, data in files.items():
+            if isinstance(data, dict):
+                data.setdefault('branch', branch)
+                if data.get('head') == data.get('base') or data.get('head') == base:
+                    marker = 'impl-' + tid
+                    (repo / marker).write_text(tid)
+                    git('add', marker)
+                    git('commit', '-m', 'implement ' + tid)
+                    data['head'] = git('rev-parse', 'HEAD')
         folder = repo / xq.STATUS_DIR
         folder.mkdir(parents=True, exist_ok=True)
         for task, data in files.items():
@@ -116,7 +125,7 @@ def verify(q, task='local', verdict='pass'):
 
 
 def collect(q, *args):
-    return q.cli('cloud-collect', '--branch', 'session/test', *args)
+    return q.cli('cloud-collect', '--branch', 'claude/test', *args)
 
 
 def test_init_and_empty_status(queue, capsys):
@@ -167,7 +176,7 @@ def test_open_status_shows_running_and_unverified_done(queue, capsys):
     verify(q, 'checked')
     assert q.cli('status', '--open') == 0
     ids = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
-    assert ids == ['running', 'delivered']
+    assert ids == ['running', 'delivered', 'checked']
 
 
 def test_assign_refuses_running_duplicate_without_append(queue):
@@ -197,6 +206,8 @@ def test_hook_reports_idle_queued_executor(queue, capsys, executor):
     assert queue.cli('hook') == 0
     assert queue.cli('assign', '--id', 'next', '--executor', executor,
                      '--brief', queue.brief, '--queued') == 0
+    if executor == 'agy':
+        (queue.repo / '.agents/config.json').write_text('{"keep_busy":["agy"]}')
     assert queue.cli('hook') == 2
     message = capsys.readouterr().err
     assert f'{executor} idle; next queued item next' in message
@@ -221,7 +232,7 @@ def test_cloud_envelope_pins_base_and_records_each_task(queue, capsys):
     assert f'"base":"{q.base}"' in output.out
     assert q.brief in output.out
     assert 'tasks c001 → c002' in output.out
-    assert 'session/test' in output.out
+    assert 'claude/test' in output.out
     assert '.agents/cloud-status/<task>.json' in output.out
     # Critic items 11, 12 and 17: v2 expands these rules into separate clauses.
     for rule in ('never push main.', 'Do not open PRs or push other branches.',
@@ -232,7 +243,7 @@ def test_cloud_envelope_pins_base_and_records_each_task(queue, capsys):
     assert [e['id'] for e in rows] == ['c001', 'c002']
     for event in rows:
         assert event.items() >= dict(event='assign', executor='cloud', base=q.base,
-                                     brief=q.brief, branch='session/test', batch='batch-one').items()
+                                     brief=q.brief, branch='claude/test', batch='batch-one').items()
 
 
 @pytest.mark.parametrize('kind', ['missing', 'untracked', 'committed-not-pushed'])
@@ -375,18 +386,20 @@ def test_cloud_collect_rejects_non_object_json_atomically(queue, capsys, raw):
 
 
 def two_batches(q):
-    q.envelope('c001')
     other = 'briefs/batch-two.md'
     (q.repo / other).write_text('## c002\nSecond batch.\n')
     q.git('add', other)
     q.git('commit', '-m', 'second brief fixture')
     q.git('push', 'origin', 'main')
+    q.envelope('c001')
     q.envelope('c002', path=other)
     data = q.status('c002')
     data['base'] = q.git('rev-parse', 'HEAD')
     # Critic item 15: the implementation head must descend from its pinned base.
     data['head'] = data['base']
-    q.publish({'c001': q.status(), 'c002': data})
+    first = q.status()
+    first['base'] = data['base']
+    q.publish({'c001': first, 'c002': data})
 
 
 def test_cloud_collect_batch_filters_progress(queue, capsys):

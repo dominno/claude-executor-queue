@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/executor-queue/scripts/xq.py\" hook"
+            "command": "f=\"$HOME/.claude/skills/executor-queue/scripts/xq.py\"; [ -f \"$f\" ] || exit 0; exec python3 \"$f\" hook"
           }
         ]
       }

@@ -42,6 +42,9 @@ def installed_version(folder):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     if sys.version_info < (3, 8):
         raise SystemExit('install: Python 3.8+ is required')
     parser = argparse.ArgumentParser(description=__doc__)
@@ -92,10 +95,13 @@ def main():
             shutil.rmtree(str(target))
         if receipt.exists():
             receipt.unlink()
+        print('Check project hooks: remove obsolete executor-queue hooks from project settings.')
         print('uninstalled executor-queue' if existed else 'executor-queue is not installed')
         return 0
     skills.mkdir(parents=True, exist_ok=True)
-    # Stage the complete payload before removing a clean/explicitly forced copy.
+    # Stage the complete payload, then swap with atomic renames.
+    # Portable directory replacement needs two renames; guarded hooks tolerate
+    # the brief gap. Keep the old tree until publication succeeds for rollback.
     with tempfile.TemporaryDirectory(prefix='.executor-queue-', dir=str(skills)) as stage:
         staged = Path(stage) / 'executor-queue'
         (staged / 'scripts').mkdir(parents=True)
@@ -104,9 +110,15 @@ def main():
         (staged / 'scripts/xq.py').chmod(0o755)
         staged_receipt = Path(stage) / 'receipt.json'
         staged_receipt.write_text(json.dumps({'schema': 1, 'version': version, 'hashes': expected}, indent=2) + '\n', encoding='utf-8')
+        backup = Path(stage) / 'previous'
         if target.exists():
-            shutil.rmtree(str(target))
-        staged.rename(target)
+            os.replace(str(target), str(backup))
+        try:
+            os.replace(str(staged), str(target))
+        except OSError:
+            if backup.exists():
+                os.replace(str(backup), str(target))
+            raise
         os.replace(str(staged_receipt), str(receipt))
     print('installed executor-queue')
     return 0
