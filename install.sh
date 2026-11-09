@@ -1,12 +1,11 @@
 #!/bin/sh
-# Install (copy) the executor-queue skill into Claude Code's user skills folder.
-# Usage: ./install.sh            -> ~/.claude/skills/executor-queue
-#        CLAUDE_SKILLS_DIR=<dir> ./install.sh
+# Offline installer; Python 3.8+ is also required by the installed helper.
 set -eu
-src="$(cd "$(dirname "$0")/skill/executor-queue" && pwd)"
-dst="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/executor-queue"
-mkdir -p "$dst/scripts"
-cp "$src/SKILL.md" "$dst/SKILL.md"
-cp "$src/scripts/xq.py" "$dst/scripts/xq.py"
-chmod +x "$dst/scripts/xq.py"
-echo "installed executor-queue skill to $dst"
+root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$root/scripts/install.py" "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python "$root/scripts/install.py" "$@"
+fi
+echo 'install: Python 3.8+ is required' >&2
+exit 1

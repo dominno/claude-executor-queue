@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$HOME/.claude/skills/executor-queue/scripts/xq.py\"; [ -f \"$f\" ] || exit 0; exec py -3 \"$f\" hook"
+          }
+        ]
+      }
+    ]
+  }
+}
