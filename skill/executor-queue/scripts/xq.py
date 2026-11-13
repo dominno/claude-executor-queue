@@ -9,7 +9,9 @@ import argparse
 from contextlib import contextmanager
 import datetime
 import glob
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -17,9 +19,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
-VERSION = '3.1.0'
+VERSION = '3.2.0'
+REPORT_MAX_BYTES = 65536
+REPORT_MAX_TEXT = 2000
+REPORT_MAX_TESTS = 100
 WINDOWS = os.name == 'nt'
 LOCK_WAIT_SECONDS = 120
 
@@ -226,7 +232,7 @@ def state(root):
             if kind == 'verify' and t.get('status') in ('running', 'queued'):
                 continue  # Forced early audit events never approve a delivery.
             if kind == 'finish':
-                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'closed', 'reason', 'report', 'head', 'tests'):
+                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'closed', 'reason', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'tests'):
                     t.pop(key, None)
             t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id')})
             if kind == 'finish':
@@ -260,9 +266,128 @@ def config(root):
         for key in ('keep_busy', 'paused'):
             if key in data and (not isinstance(data[key], list) or any(x not in EXECUTORS for x in data[key])):
                 raise ValueError()
+        limits = data.get('limits', {})
+        if not isinstance(limits, dict) or any(
+                k not in ('codex', 'agy') or type(v) is not int or v < 0
+                for k, v in limits.items()):
+            raise ValueError()
+        for key, default in (('min_free_gb', 5), ('max_load_per_cpu', 1.0)):
+            value = data.get(key, default)
+            if (type(value) not in (int, float) or not math.isfinite(value) or
+                    value < 0 or (key == 'max_load_per_cpu' and value == 0)):
+                raise ValueError()
+        if 'main' in data and (not isinstance(data['main'], str) or not data['main']):
+            raise ValueError()
         return data
-    except (ValueError, OSError):
-        fail('invalid .agents/config.json (keep_busy/paused must be executor lists)')
+    except (ValueError, OSError, OverflowError):
+        fail('invalid .agents/config.json (keep_busy/paused: executor lists; limits: codex/agy nonnegative integers; '
+             'min_free_gb: finite nonnegative number; max_load_per_cpu: finite positive number; main: branch string)')
+
+
+def resource_readings(root):
+    """Host probes kept separate so tests can inject readings without env overrides."""
+    try:
+        load = None if WINDOWS else os.getloadavg()[0]
+    except (AttributeError, OSError) as exc:
+        raise OSError('load average unavailable: ' + str(exc))
+    return dict(load=load, cpus=os.cpu_count() or 1,
+                repo_free_gb=shutil.disk_usage(root).free / 1024**3,
+                temp_free_gb=shutil.disk_usage(tempfile.gettempdir()).free / 1024**3)
+
+
+def process_rows():
+    """Return (executable name, command line) pairs; never inspect environments."""
+    if WINDOWS:
+        result = run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
+                      'Get-CimInstance Win32_Process | Select-Object Name,CommandLine | ConvertTo-Json -Compress'])
+        if result.returncode:
+            raise OSError('cannot read live processes: ' + result.stderr.strip())
+        rows = json.loads(result.stdout or '[]')
+        if isinstance(rows, dict):
+            rows = [rows]
+        return [(row['Name'], row.get('CommandLine') or '') for row in rows]
+    result = run(['ps', '-axo', 'comm=,args='])
+    if result.returncode:
+        raise OSError('cannot read live processes: ' + result.stderr.strip())
+    return [tuple(line.strip().split(None, 1)) for line in result.stdout.splitlines()
+            if len(line.strip().split(None, 1)) == 2]
+
+
+def live_process_counts():
+    """Conservative global count, including wrappers; see docs/codex.md."""
+    counts = dict(codex=0, agy=0)
+    for name, command in process_rows():
+        name = name.replace('\\', '/').rsplit('/', 1)[-1].lower()
+        if name.endswith('.exe'):
+            name = name[:-4]
+        # ps command lines aren't shell programs. Tokenize only to recognize
+        # exact executable/script names, never execute or substring-match them.
+        try:
+            tokens = shlex.split(command, posix=not WINDOWS)
+        except ValueError:
+            tokens = command.split()
+        tokens = [token.strip('"').replace('\\', '/').rsplit('/', 1)[-1] for token in tokens]
+        if name == 'codex':
+            if not any(t in ('--version', '--help', 'login', 'logout', 'status', 'completion') for t in tokens[1:2]):
+                counts['codex'] += 1
+        elif name == 'agy':
+            if not any(t in ('--version', '--help', 'models', 'login', 'logout') for t in tokens[1:2]):
+                counts['agy'] += 1
+        elif name in ('node', 'nodejs'):
+            if ('codex-companion.mjs' in tokens and 'task' in tokens) or 'codex.js' in tokens:
+                counts['codex'] += 1
+        elif re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?|py', name):
+            if any(t in ('agy-bridge', 'agy-bridge.py') for t in tokens):
+                if 'delegate' in tokens or any(tokens[i:i+2] == ['queue', 'run'] for i in range(len(tokens))):
+                    counts['agy'] += 1
+    return counts
+
+
+def preflight_status(root, tasks, data):
+    reasons, details = [], []
+    try:
+        readings = resource_readings(root)
+        load = readings['load']
+        if load is None:
+            details.append('NOTE load average unavailable; skipping load check')
+        else:
+            ratio = load / readings['cpus']
+            details.append('load 1m {:.2f} / {} CPUs = {:.2f} (max {:.2f})'.format(
+                load, readings['cpus'], ratio, data.get('max_load_per_cpu', 1.0)))
+            if ratio > data.get('max_load_per_cpu', 1.0):
+                reasons.append(details[-1])
+        for volume in ('repo', 'temp'):
+            free = readings[volume + '_free_gb']
+            details.append('{} free {:.2f} GiB (min {:.2f})'.format(volume, free, data.get('min_free_gb', 5)))
+            if free < data.get('min_free_gb', 5):
+                reasons.append(details[-1])
+    except OSError as exc:
+        reasons.append('resource readings unavailable: ' + str(exc))
+    try:
+        live = live_process_counts()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        live = dict(codex=0, agy=0)
+        reasons.append('live process readings unavailable: ' + str(exc))
+    per_executor = {}
+    for executor, default in (('codex', 2), ('agy', 1)):
+        ledger = sum(t.get('executor') == executor and t.get('status') == 'running' for t in tasks)
+        count = max(ledger, live[executor])
+        limit = data.get('limits', {}).get(executor, default)
+        detail = '{} running {}/{} (ledger {}, live {})'.format(executor, count, limit, ledger, live[executor])
+        details.append(detail)
+        per_executor[executor] = reasons + ([detail] if count >= limit else [])
+    return per_executor, details
+
+
+def cmd_preflight(a):
+    root = repo_root()
+    reasons, details = preflight_status(root, list(state(root).values()), config(root))
+    for detail in details:
+        print(detail)
+    refused = reasons[a.executor]
+    print('{} preflight {}{}'.format(a.executor, 'refused' if refused else 'OK',
+                                    ': ' + '; '.join(refused) if refused else ''))
+    return 1 if refused else 0
 
 
 def write_config(root, data):
@@ -315,6 +440,8 @@ def cmd_init(a):
 
 
 def cmd_assign(a):
+    if a.executor == 'cloud':
+        fail('assign --executor cloud is unsupported; use cloud-envelope to pin a pushed brief and base')
     root = repo_root()
     valid_id(a.id)
     known = state(root)
@@ -400,7 +527,7 @@ def cmd_merge(a):
     if not a.force:
         if not head or not ancestor(head, sha, root):
             fail('merge commit must contain the verified head')
-        main = default_branch(root)
+        main = require_main(root, a.main)
         if not ancestor(sha, 'refs/heads/' + main, root):
             fail('merge commit must be reachable from the default branch ' + main)
     if head and head != sha:
@@ -469,6 +596,7 @@ def cmd_hook(a):
     if unverified:
         problems.append('finished but not verified: ' + ', '.join(unverified[:8]))
     data = config(root)
+    capacity = None
     for ex in EXECUTORS:
         if ex in data.get('paused', []):
             continue
@@ -477,6 +605,15 @@ def cmd_hook(a):
         if ex == 'agy' and ex not in data.get('keep_busy', []):
             continue
         if not busy and (queued or ex in data.get('keep_busy', [])):
+            if ex in ('codex', 'agy'):
+                if capacity is None:
+                    capacity, details = preflight_status(root, list(state(root).values()), data)
+                    for detail in details:
+                        if detail.startswith('NOTE '):
+                            print(detail, file=sys.stderr)
+                if capacity[ex]:
+                    print(ex + ' preflight refused: ' + '; '.join(capacity[ex]), file=sys.stderr)
+                    continue
             problems.append(ex + ' idle; ' + ('next queued item ' + queued[0] if queued else 'no queued item; pause or review keep_busy configuration'))
     old = [t['id'] for t in tasks if t.get('executor') not in data.get('paused', []) and stale(t, a.stale_hours)]
     if old:
@@ -557,15 +694,29 @@ def plugin_binary(kind):
     return paths[-1] if paths else None
 
 
-def default_branch(root):
+def origin_default(root):
     ref = git('symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD', check=False, cwd=root).strip()
-    if ref.startswith('origin/'):
-        return ref[len('origin/'):]
-    # Local-only repos may have no remote HEAD; never silently hardcode main.
+    return ref[len('origin/'):] if ref.startswith('origin/') else None
+
+
+def default_branch(root):
+    ref = origin_default(root)
+    if ref:
+        return ref
     ref = git('symbolic-ref', '--quiet', '--short', 'HEAD', check=False, cwd=root).strip()
     if not ref:
         fail('cannot determine default branch; set origin/HEAD or pass --main')
     return ref
+
+
+def require_main(root, explicit=None):
+    branch = explicit or config(root).get('main') or origin_default(root)
+    if not branch:
+        fail('origin/HEAD unset; pass --main <branch> or set "main" in .agents/config.json')
+    if not isinstance(branch, str):
+        fail('config main must be a branch string')
+    valid_branch(branch, root)
+    return branch
 
 
 def doctor(a):
@@ -580,13 +731,25 @@ def doctor(a):
         ok = ok and bool(good)
         print('{} {}: {}'.format('OK' if good else 'MISSING', name, detail))
 
+    capacity, details = preflight_status(root, list(state(root).values()), config(root))
+    for detail in details:
+        print(detail)
+    for ex, reasons in capacity.items():
+        if reasons:
+            print(ex + ' preflight refused: ' + '; '.join(reasons))
+    version = run(['git', '--version'], cwd=root)
+    match = re.search(r'git version (\d+)\.(\d+)([^\s]*)', version.stdout)
+    print('git version: ' + (match.group(0)[len('git version '):] if match else 'unknown'))
+    if match and tuple(map(int, match.group(1, 2))) < (2, 31):
+        print('WARN git < 2.31: primary-checkout recipes require Git >= 2.31')
     check('git HEAD', run(['git', 'rev-parse', '--verify', 'HEAD'], cwd=root).returncode == 0, 'commit an initial HEAD if missing')
     try:
         branch = default_branch(root)
     except SystemExit as exc:
         check('default branch', False, str(exc))
     else:
-        print('default branch: ' + branch)
+        label = 'default branch' if origin_default(root) else 'default branch (local HEAD fallback, origin/HEAD unset)'
+        print(label + ': ' + branch)
     for path in PRIVATE_PATHS:
         probe = path.lstrip('/') + ('probe' if path.endswith('/') else '')
         ignored = run(['git', 'check-ignore', '-q', probe], cwd=root).returncode == 0
@@ -640,7 +803,41 @@ def cmd_agy_sync(a):
     rows = []
     problem = False
     known, stamp = snapshot(root)
+    explicit = getattr(a, 'delegate_exit', None)
+    out = getattr(a, 'out', None)
+    if bool(explicit) != bool(out):
+        fail('--delegate-exit <id>=<code> requires an absolute --out path')
+    if explicit:
+        match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9._-]{0,119})=(\d+)', explicit)
+        if not match:
+            fail('--delegate-exit requires <id>=<nonnegative exit code>')
+        tid, code = match.group(1), int(match.group(2))
+        t = known.get(tid, {})
+        if t.get('executor') != 'agy' or t.get('status') != 'running':
+            fail('--delegate-exit requires a running agy task')
+        result = Path(out)
+        if not result.is_absolute():
+            fail('--out must be an absolute path')
+        safe_path(result)
+        if code == 0 and not exact_file(result):
+            fail('successful delegate requires an existing --out result')
+        archives = root / '.agy-bridge/queue'
+        if any(exact_file(archives / name / (tid + '.job')) for name in ('', 'done', 'failed')):
+            fail('delegate has a queue archive; use ordinary agy-sync to preserve bridge checks')
+        for candidate in {result, root / '.agy-bridge/results' / (tid + '.md')}:
+            safe_path(candidate)
+            if not exact_file(candidate):
+                continue
+            text = candidate.read_text(encoding='utf-8', errors='replace')
+            header = re.split(r'^## (?:Round \d+|Answer)\s*$', text, maxsplit=1, flags=re.M)[0]
+            if re.search(r'^(?:exit_code:|FILES NOT SENT:)', header, re.M):
+                fail('result has bridge metadata; use ordinary agy-sync to preserve bridge checks')
+        rows.append(dict(event='finish', id=tid, status='done' if code == 0 else 'failed',
+                         summary='Unverified plain delegate exit {}: {}'.format(code, result),
+                         delegate_exit=code, result=str(result)))
     for tid, t in known.items():
+        if explicit and tid == match.group(1):
+            continue
         if t.get('executor') != 'agy' or t.get('status') not in ('running', 'queued'):
             continue
         valid_id(tid)
@@ -768,8 +965,9 @@ def cmd_cloud_envelope(a):
         valid_id(tid)
     if len(set(ids)) != len(ids):
         fail('task ids must be distinct')
-    main = a.main or default_branch(root)
-    valid_branch(main, root)
+    main = a.main if a.reprint else require_main(root, a.main)
+    if main:
+        valid_branch(main, root)
     if a.branch:
         valid_branch(a.branch, root)
         if a.branch == main:
@@ -797,7 +995,7 @@ def cmd_cloud_envelope(a):
             fail('--reprint tasks must belong to the same envelope')
         base = first['base']
         brief = first['brief']
-        main = first.get('main', main)
+        main = first.get('main') or require_main(root, a.main)
         branch = first.get('branch')
         print(envelope_text(ids, brief, base, main, branch))
         return 0
@@ -826,6 +1024,17 @@ def ancestor(before, after, root):
     return run(['git', 'merge-base', '--is-ancestor', before, after], cwd=root).returncode == 0
 
 
+def report_hash(data):
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=True,
+                                     separators=(',', ':')).encode('ascii')).hexdigest()
+
+
+def clean_report(data):
+    result = {k: data[k] for k in ('task', 'status', 'summary', 'tests', 'head', 'base', 'utc', 'branch')}
+    result['tests'] = [{k: row[k] for k in ('cmd', 'result')} for row in data['tests']]
+    return result
+
+
 def validate_report(data, tid, t, ref, root, branch):
     if not isinstance(data, dict):
         return ['expected JSON object']
@@ -839,10 +1048,18 @@ def validate_report(data, tid, t, ref, root, branch):
         reasons.append('invalid status')
     if not isinstance(data.get('summary'), str):
         reasons.append('summary must be a string')
+    if isinstance(data.get('summary'), str) and len(data['summary']) > REPORT_MAX_TEXT:
+        reasons.append('summary length limit exceeded (2000)')
     tests = data.get('tests')
     if not isinstance(tests, list) or any(not isinstance(row, dict) or
             not all(isinstance(row.get(k), str) for k in ('cmd', 'result')) for row in tests):
         reasons.append('tests must be a list of {cmd,result} strings')
+    if isinstance(tests, list):
+        if len(tests) > REPORT_MAX_TESTS:
+            reasons.append('tests count limit exceeded (100)')
+        if any(isinstance(row, dict) and any(isinstance(row.get(k), str) and len(row[k]) > REPORT_MAX_TEXT
+               for k in ('cmd', 'result')) for row in tests):
+            reasons.append('test field length limit exceeded (2000)')
     utc = data.get('utc')
     try:
         if not isinstance(utc, str):
@@ -869,7 +1086,7 @@ def validate_report(data, tid, t, ref, root, branch):
             resolved_head = git('rev-parse', '--verify', head + '^{commit}', cwd=root).strip()
             if resolved_head == base or not re.search(r'(?<![\w.-])' + re.escape(tid) + r'(?![\w.-])', message):
                 reasons.append('done requires an implementation commit with this task id')
-        main = t.get('main') or default_branch(root)
+        main = t.get('main') or require_main(root)
         main_ref = 'refs/heads/' + main
         if not git('rev-parse', '--verify', main_ref, check=False, cwd=root).strip():
             main_ref = 'refs/remotes/origin/' + main
@@ -925,6 +1142,7 @@ def cmd_cloud_collect(a):
             branch = refname[len('refs/heads/'):]
             if branch not in branches:
                 branches.append(branch)
+    main = require_main(root, a.main) if cloud else None
     seen, pending, fingerprints, heads = set(), [], {}, {}
     bad, diffs, warned = {}, {}, set()
 
@@ -970,19 +1188,25 @@ def cmd_cloud_collect(a):
             if t.get('branch') and t['branch'] != branch:
                 problem(tid, 'PROBLEM {}: report on {} but bound to {}'.format(tid, branch, t['branch']))
                 continue
+            blob = ref + ':' + name
+            size = int(git('cat-file', '-s', blob, cwd=root).strip())
+            if size > REPORT_MAX_BYTES:
+                problem(tid, 'PROBLEM {}: report file size limit exceeded (65536 bytes)'.format(tid))
+                continue
             try:
-                data = json.loads(git('show', ref + ':' + name, cwd=root))
+                data = json.loads(git('show', blob, cwd=root))
             except (ValueError, RecursionError):
                 problem(tid, 'PROBLEM {}: invalid JSON'.format(tid))
                 continue
+            report_sha256 = report_hash(data)
             if t.get('status') != 'running':
-                if t['report'] != data:
+                if t.get('report_sha256', report_hash(t['report'])) != report_sha256:
                     problem(tid, 'CHANGED {}: {} -> {} (report differs; reconcile explicitly)'.format(
                         tid, t.get('status'), data.get('status') if isinstance(data, dict) else '?'))
                 else:
                     warn_changes(t, tid, data, ref)
                 continue
-            reasons = validate_report(data, tid, t, ref, root, branch)
+            reasons = validate_report(data, tid, dict(t, main=a.main or config(root).get('main') or t.get('main') or main), ref, root, branch)
             if isinstance(data, dict) and data.get('status') == 'done':
                 head = data.get('head')
                 if isinstance(head, str) and SHA_RE.fullmatch(head) and ancestor(head, ref, root):
@@ -997,14 +1221,15 @@ def cmd_cloud_collect(a):
                 problem(tid, 'PROBLEM {}: {}'.format(tid, '; '.join(reasons)))
                 continue
             warn_changes(t, tid, data, ref)
-            fingerprint = json.dumps(data, sort_keys=True, ensure_ascii=False)
+            fingerprint = report_sha256
             if tid in fingerprints:
                 if not t.get('branch') or fingerprints[tid] != fingerprint:
                     problem(tid, 'CHANGED {}: conflicting reports across session branches; unbound reports require one branch'.format(tid))
                 continue
             fingerprints[tid] = fingerprint
+            data = clean_report(data)
             pending.append(dict(event='finish', id=tid, status=data['status'], summary=data['summary'][:2000],
-                                head=data['head'], tests=data['tests'], report=data, branch=branch))
+                                head=data['head'], tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch))
     batches = {t.get('batch') for tid, t in cloud.items() if tid in seen or t.get('branch') in branches}
     batches.discard(None)
     if a.batch:
@@ -1043,6 +1268,7 @@ def main():
     p.add_argument('--version', action='version', version='%(prog)s ' + VERSION)
     sub = p.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('doctor'); s.add_argument('--need', default='codex,agy,cloud'); s.set_defaults(fn=doctor)
+    s = sub.add_parser('preflight'); s.add_argument('--executor', choices=('codex', 'agy'), required=True); s.set_defaults(fn=cmd_preflight)
     s = sub.add_parser('init'); s.add_argument('--local', action='store_true'); s.set_defaults(fn=cmd_init)
     s = sub.add_parser('assign'); s.add_argument('--id', required=True); s.add_argument('--executor', choices=EXECUTORS, required=True)
     s.add_argument('--brief', required=True); s.add_argument('--note'); s.add_argument('--job'); s.add_argument('--worktree')
@@ -1053,7 +1279,7 @@ def main():
     s.add_argument('--by', required=True); s.add_argument('--verdict', required=True, choices=('pass', 'fixes', 'reject'))
     s.add_argument('--head'); s.add_argument('--evidence', required=True); s.set_defaults(fn=cmd_verify)
     s = sub.add_parser('merge'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
-    s.add_argument('--commit', required=True); s.set_defaults(fn=cmd_merge)
+    s.add_argument('--commit', required=True); s.add_argument('--main'); s.set_defaults(fn=cmd_merge)
     s = sub.add_parser('ack'); s.add_argument('--id', required=True); s.add_argument('--hours', type=float, default=4)
     s.set_defaults(fn=cmd_ack, force=False)
     s = sub.add_parser('close'); s.add_argument('--id', required=True); s.add_argument('--reason', required=True)
@@ -1062,12 +1288,20 @@ def main():
     s = sub.add_parser('hook'); s.add_argument('--stale-hours', type=float, default=4); s.set_defaults(fn=cmd_hook)
     s = sub.add_parser('pause'); s.add_argument('--executor', choices=EXECUTORS, required=True); s.add_argument('--resume', action='store_true'); s.set_defaults(fn=cmd_pause)
     sub.add_parser('poll').set_defaults(fn=cmd_poll)
-    sub.add_parser('agy-sync').set_defaults(fn=cmd_agy_sync)
+    s = sub.add_parser('agy-sync'); s.add_argument('--delegate-exit'); s.add_argument('--out'); s.set_defaults(fn=cmd_agy_sync)
     s = sub.add_parser('cloud-envelope'); s.add_argument('--brief', required=True); s.add_argument('--tasks', required=True, nargs='+')
     s.add_argument('--branch'); s.add_argument('--main'); s.add_argument('--reprint', action='store_true'); s.set_defaults(fn=cmd_cloud_envelope)
     s = sub.add_parser('cloud-collect'); s.add_argument('--branch'); s.add_argument('--discover', action='store_true')
     s.add_argument('--batch'); s.add_argument('--main'); s.set_defaults(fn=cmd_cloud_collect)
     a = p.parse_args()
+    # POSIX argv uses surrogateescape for undecodable bytes. Repair before any
+    # command builds events (including notes, evidence, paths and identifiers).
+    for key, value in vars(a).items():
+        if isinstance(value, str):
+            setattr(a, key, value.encode('utf-8', errors='surrogateescape').decode('utf-8', errors='replace'))
+        elif isinstance(value, list):
+            setattr(a, key, [v.encode('utf-8', errors='surrogateescape').decode('utf-8', errors='replace')
+                             if isinstance(v, str) else v for v in value])
     if a.cmd in ('init', 'assign', 'finish', 'verify', 'merge', 'pause', 'ack', 'close'):
         with ledger_lock(repo_root()):
             return a.fn(a)

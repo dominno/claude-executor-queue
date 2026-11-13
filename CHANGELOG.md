@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.2 — 3.2.0 — 2026-11-13
+
+- Label local HEAD fallback and require an explicit main branch for merge/cloud commands without origin/HEAD.
+- Clarify same-Claude-session resume limits and fresh fix launches in the same worktree.
+- Reconcile plain delegate successes/failures with explicit exit codes and absolute output paths.
+- Repair non-UTF-8 text arguments before events; reject unsupported direct cloud assignments.
+- Bound cloud reports, drop unknown stored keys, and retain full report SHA-256 for change detection.
+- Document Git >= 2.31 and report/warn on Git versions in doctor. Keep Stop hooks read-only and unlocked.
+- Add validated load/disk/concurrency preflight, conservative injectable OS process counts, doctor readings, and idle-hook refusal diagnostics.
+- See docs/v3.2-notes.md for regression mapping and suite results.
+
 ## v3.1 — 3.1.0 — 2026-11-09
 
 - Address every confirmed council-table row (16 important, 8 actual nice rows; report summary overcounts by one).

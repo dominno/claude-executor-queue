@@ -45,6 +45,9 @@ def queue(xq, tmp_path, monkeypatch):
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.chdir(repo)
+    monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(
+        load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
+    monkeypatch.setattr(xq, 'live_process_counts', lambda: dict(codex=0, agy=0))
 
     def git(*args):
         return subprocess.run(
@@ -71,6 +74,7 @@ def queue(xq, tmp_path, monkeypatch):
     git('init', '--bare', str(remote))
     git('remote', 'add', 'origin', str(remote))
     git('push', 'origin', 'main')
+    git('remote', 'set-head', 'origin', 'main')
     base = git('rev-parse', 'HEAD')
 
     def cli(*args):
@@ -111,6 +115,10 @@ def queue(xq, tmp_path, monkeypatch):
 
 
 def assign(q, task='local', executor='codex'):
+    if executor == 'cloud':
+        # Historical/synthetic cloud lifecycle fixture; new CLI assignments use envelopes.
+        q.xq.append(q.repo, dict(event='assign', id=task, executor=executor, brief=q.brief, note='fixture'))
+        return
     assert q.cli('assign', '--id', task, '--executor', executor,
                  '--brief', q.brief, '--note', 'fixture') == 0
 

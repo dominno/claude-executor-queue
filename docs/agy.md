@@ -6,9 +6,23 @@ Use `xq.py init`, then `xq.py doctor --need agy`; see `codex.md` for plugin setu
 
 
 Use the resolved `"$AGYB"` in every CLI invocation. Start with `/agy:dry-run` and read the manifest for **each new file set**.
-Before delegate or queue add, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`
+Immediately before each delegate or queue run, run `xq.py preflight --executor agy` and proceed only on exit 0.
+Run preflight before recording a running assignment, so the new task does not consume its own last slot.
+After preflight, before delegate or queue add, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`
 (a queued assignment can be promoted after its matching pending job exists). Existing bridge names/artifacts refuse assignment; use a new id.
-For a single review: `"$AGYB" delegate --repo "$root" --file A --file B --out .agy-bridge/results/<id>.md --cite -- '<task>'`.
+For a single review: `"$AGYB" delegate --repo "$root" --file A --file B --out "$root/.agy-bridge/results/<id>.md" --cite -- '<task>'`.
+Capture the delegate's exit code immediately, even when it fails:
+```sh
+xq.py preflight --executor agy || exit $?
+# Record the running assignment here, after preflight and before delegate.
+rc=0
+"$AGYB" delegate --repo "$root" --file A --out "$root/.agy-bridge/results/<id>.md" --cite -- '<task>' || rc=$?
+xq.py agy-sync --delegate-exit "<id>=$rc" --out "$root/.agy-bridge/results/<id>.md"
+```
+Use an absolute `--out` for both commands. A failed delegate can leave no result or archive;
+a plain successful answer may lack bridge metadata. Ordinary sync cannot infer either outcome.
+The explicit exit records done for 0 (requires a result file), failed otherwise (file may be absent),
+without verification. Inspect the actual answer/failure, then independently verify or request a fresh review.
 agy cannot search unseen files. No confidential data, `.env`, credentials, `.claude/` or user media.
 
 The bridge refuses worktree roots and out-of-repo inputs. For worktree review, export a diff inside the primary repo:
@@ -35,12 +49,14 @@ Queue job schema (name must equal xq id and be unique across pending/archive/res
 `files` are explicit repo-relative regular paths, no globs, traversal or symlink components. `context` defaults to true
 and silently adds configured `context_files`: set false for a bounded manifest. `need` stays false without explicit
 permission to send additional files. Unknown fields refuse; exit 1 = usage/job error, 4 = rule/path/lock refusal.
-Use `"$AGYB" queue add job.json --repo "$root"` then `"$AGYB" queue run --repo "$root"` once.
+Use `assign --queued` and `"$AGYB" queue add job.json --repo "$root"` for backlog.
+Before `"$AGYB" queue run --repo "$root"`, run preflight, promote only the item about to run, then run the queue once.
+Keep each run within the preflight capacity; do not let an unbounded queue launch a new batch without another check.
 `queue watch` is allowed only on the user's explicit request; never start it to silence a hook.
 
 Read the result header first: nonempty FILES NOT SENT or exit 15/16/17 means reject or a newly authorized rerun.
 VERIFIED means only that a citation exists in an input, not that the conclusion is true. `xq.py agy-sync` reads
-`.agy-bridge/results/` and `queue/done|failed`; missing/unrecognized headers (including plain delegate answer files) need manual finish/reconciliation.
+`.agy-bridge/results/` and `queue/done|failed`; missing/unrecognized headers (including plain delegate answer files) need explicit `--delegate-exit` with absolute `--out`, or manual finish/reconciliation.
 Record actual review both in xq and `"$AGYB" verdict --repo "$root" --job <id> --verdict <v> --by <reader> --evidence '<checks>'`.
 Ignore `.agy-bridge/` and scan for accidentally tracked results before every push.
 

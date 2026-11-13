@@ -124,7 +124,7 @@ disposable destinations. CI is configured for Python 3.8/3.12 on Ubuntu/macOS/Wi
 Python/pytest, while the tests themselves stay offline. Windows shares the
 installer core; native PowerShell validation requires a Windows/PowerShell host.
 
-See [CHANGELOG.md](CHANGELOG.md) and [v3.1 notes](docs/v3.1-notes.md) for release details.
+See [CHANGELOG.md](CHANGELOG.md) and [v3.2 notes](docs/v3.2-notes.md) for release details.
 
 License: to be chosen by the owner
 
@@ -140,3 +140,10 @@ doctor checks exclusions. `.agents/config.json` is trackable policy: review it b
 Use the guarded hook examples (Windows hooks run in Git Bash). Missing user-level installs in cloud
 clones no longer block Stop. Uninstall warns about project hooks. Upgrades stage and rename the old/new
 payload, rolling back publication failures; the guarded hook tolerates the brief rename gap.
+
+Version 3.2.0 adds explicit base selection without origin/HEAD, plain delegate reconciliation, bounded cloud reports and UTF-8 argument repair. Recipes using `--path-format` require Git >= 2.31.
+
+Before every Codex launch or agy queue run/delegate, run `xq.py preflight --executor codex`
+(or `agy`) and proceed only on exit 0. Defaults: load/CPU <= 1.0, at least 5 GiB free on
+both repo and temp volumes, and fewer than 2 Codex / 1 agy running executors. Configure
+`.agents/config.json`; see [preflight policy and process matching](docs/codex.md#launch-preflight).

@@ -6,6 +6,7 @@ These optional recipes expand the installed skill. `xq.py` below means the insta
 ## Setup
 
 Run `xq.py doctor --need codex,agy,cloud`, selecting only the executors needed. Missing unused tools are SKIP.
+Git >= 2.31 is required by the primary-checkout recipe (`--path-format`); doctor reports the version and warns below 2.31.
 It checks HEAD, the default branch, Node/auth, plugin capabilities, ignores and (for cloud only) origin.
 It prints shell assignments `CC=...` and `AGYB=...`; use those exact resolved paths, never an unquoted multi-version glob.
 Resolution prefers installed_plugins.json `installPath`, falling back to version sorting in the plugin cache.
@@ -46,8 +47,10 @@ No executor receives permission for paid calls, network, push or merge merely by
    ```
    On retry use a fresh id or `-r2` branch/path; inspect existing worktrees first. Prepare real dependencies there
    (`pnpm install --frozen-lockfile`, `uv sync`, as appropriate and authorized); never symlink dependencies.
-3. Run Codex using the `CC` from doctor:
+3. Immediately before every Codex launch (including retries/resumes), run preflight and proceed only on exit 0.
+   Use the `CC` from doctor:
    ```sh
+   xq.py preflight --executor codex || exit $?
    node "$CC" task --background --write --cwd "$wt" --effort medium --prompt-file "$root/.agents/briefs/<id>.md"
    xq.py assign --id <id> --executor codex --brief .agents/briefs/<id>.md --job <jobId> --worktree "$wt"
    ```
@@ -76,6 +79,46 @@ No executor receives permission for paid calls, network, push or merge merely by
    Record the resulting **merge** SHA: `xq.py merge --id <id> --commit "$(git rev-parse HEAD)"` (checks commit exists).
    Preserve needed results, then `git worktree remove "$wt"` and `git branch -d xq/<id>`. Run relevant project checks.
 
-Fix loop: write `<id>-fix1.md`, use `task --resume-last` in the same worktree (`--fresh` for a fresh session), then
+Fix loop: write `<id>-fix1.md`. `task --resume-last` works only within the same Claude session.
+In a later Claude session, launch the -fix1 brief fresh in the same worktree using the normal
+`task --background --write --cwd "$wt" --prompt-file "$root/.agents/briefs/<id>-fix1.md"` command, then
 `assign --id <id>-fix1 --note 'follows <id>'` with the normal executor/brief/job/worktree fields. A retry needs fresh verification.
 
+
+## Launch preflight
+
+xq never launches executors. The lead must run `xq.py preflight --executor codex|agy`
+immediately before each launch, and wait/reconcile when it exits nonzero. Run it before
+agy `queue run` or `delegate` too. For agy, run preflight before recording a running
+assignment; otherwise that assignment itself uses a slot. Queued assignments use no slot.
+Codex records its running assignment immediately after launch.
+
+`.agents/config.json` accepts these defaults, alongside existing policy keys:
+```json
+{"limits":{"codex":2,"agy":1},"min_free_gb":5,"max_load_per_cpu":1.0}
+```
+`limits` accepts only codex/agy keys and nonnegative integers (0 disables launches).
+`min_free_gb` is a finite nonnegative number of GiB; `max_load_per_cpu` is finite and
+positive. Booleans and numeric strings are rejected. Omitted keys retain defaults.
+Preflight refuses when 1-minute load / CPU count is above the maximum, repo-volume
+or `tempfile.gettempdir()`-volume free space is below the minimum, or the selected
+executor count reaches its limit. Windows skips load with a printed note; disk and
+count checks still apply. Probe failures refuse launch. Doctor prints all readings.
+The Stop hook prints refusal reasons instead of demanding work from an idle executor;
+verification and stale-work checks still apply. Both preflight and hook are read-only
+and take no ledger lock. This is a point-in-time check, not a slot reservation; the lead
+must serialize launch decisions across sessions to avoid simultaneous-launch races.
+
+Counts use `max(ledger running tasks, matched live OS processes)` separately for each
+kind, including closed tasks still marked running. OS counts are global, across repos.
+POSIX uses `ps -axo comm=,args=`; Windows uses PowerShell `Get-CimInstance Win32_Process`
+for executable names and command lines. Matching uses exact executable/script names:
+`codex[.exe]` and `agy[.exe]` (excluding known auth/help/status commands), Node running
+`codex.js` or `codex-companion.mjs task`, and Python/py running `agy-bridge[.py] delegate`
+or `queue run`. Shells, substring matches, bridge queue-add/status and companion status
+are excluded. Wrappers and their live children can both count, deliberately erring on
+the side of refusing another launch. Renamed executables and unrelated/custom launchers
+may be missed; ledger counts cover recorded tasks. No executor is started or queried.
+Tests inject `resource_readings(root)` and `live_process_counts()`; matcher tests inject
+`process_rows()` pairs of `(executable_name, command_line)`. There is no environment
+variable that disables the guard.
