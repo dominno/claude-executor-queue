@@ -1,3 +1,11 @@
 {
-  "keep_busy": ["codex"]
+  "keep_busy": [
+    "codex"
+  ],
+  "limits": {
+    "codex": 2,
+    "agy": 1
+  },
+  "min_free_gb": 5,
+  "max_load_per_cpu": 1.0
 }

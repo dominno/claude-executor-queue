@@ -56,3 +56,13 @@ explicitly supplied and records that fact in the ledger. Remote reports never su
 Healthy long cloud sessions can use `ack --id <id> --hours 12`; pause suppresses idle and stale checks
 for the named executor. Cloud clones and teammates do not have the user-level installed skill; use the
 guarded optional Stop-hook snippet so its absence permits Stop. Collection does not run tests or merge.
+
+When origin/HEAD is unset, `cloud-envelope`, `cloud-collect` and `merge` require
+`--main <branch>` or `{"main":"<branch>"}` in `.agents/config.json`. Doctor labels its
+local HEAD fallback; it is diagnostic only. An existing origin/HEAD keeps normal discovery.
+Create cloud tasks with `cloud-envelope`; `assign --executor cloud` (including `--queued`) refuses.
+Reports must fit 65536 bytes, with a summary of at most 2000 characters, at most 100 tests,
+and test cmd/result strings of at most 2000 characters each. Oversized reports refuse atomically
+within their batch. Unknown top-level/test keys are dropped from stored reports. `report_sha256`
+hashes the full parsed report (sorted JSON keys; whitespace is ignored), including unknown keys,
+so subsequent changes still produce CHANGED. Pre-3.2 reports compare against their stored content.

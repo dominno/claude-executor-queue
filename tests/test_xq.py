@@ -35,6 +35,11 @@ def q(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location('xq_under_test', SCRIPT)
     xq = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(xq)
+    real_resource_readings = xq.resource_readings
+    real_live_process_counts = xq.live_process_counts
+    monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(
+        load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
+    monkeypatch.setattr(xq, 'live_process_counts', lambda: dict(codex=0, agy=0))
 
     def git(*args):
         return subprocess.run(['git', '-c', 'commit.gpgsign=false', *args],
@@ -518,8 +523,8 @@ def test_envelope_duplicate_atomic_and_reprint_without_fetch(q, monkeypatch):
 def test_python38_syntax_and_stdlib():
     import ast
     tree = ast.parse(SCRIPT.read_text(encoding='utf-8'), feature_version=(3, 8))
-    allowed = {'argparse', 'contextlib', 'datetime', 'glob', 'json', 'os', 'pathlib', 're',
-               'shlex', 'shutil', 'subprocess', 'sys', 'fcntl', 'msvcrt', 'time'}
+    allowed = {'argparse', 'contextlib', 'datetime', 'glob', 'hashlib', 'json', 'math', 'os', 'pathlib', 're',
+               'shlex', 'shutil', 'subprocess', 'sys', 'fcntl', 'msvcrt', 'time', 'tempfile'}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert all(n.name.split('.')[0] in allowed for n in node.names)
@@ -587,7 +592,7 @@ def test_review_01_collect_ignores_unbound_other_batch(q, capsys, other_batch):
 
 
 def test_review_02_reprint_plain_cloud_assignment_has_clean_error(q):
-    q.assign('a', 'cloud')
+    q.xq.append(q.repo, dict(event='assign', id='a', executor='cloud', brief=q.brief))
     before = q.xq.events(q.repo)
     with pytest.raises(SystemExit, match='envelope|pinned base'):
         q.envelope('a', **{'--reprint': True})
@@ -716,7 +721,11 @@ def test_review_07_linked_worktree_uses_primary_checkout_git(q, monkeypatch):
     q.git('worktree', 'add', '--detach', str(wt))
     q.git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
     monkeypatch.chdir(wt)
-    # Fallback HEAD must be the primary checkout's branch, not detached wt HEAD.
+    # Fallback diagnostics use the primary branch even from detached worktrees.
+    assert q.xq.default_branch(q.xq.repo_root()) == 'main'
+    with pytest.raises(SystemExit, match='origin/HEAD.*--main'):
+        q.envelope()
+    (q.repo / '.agents/config.json').write_text('{"main":"main"}')
     assert q.envelope() == 0
     assert q.xq.state(q.repo)['a']['main'] == 'main'
 
@@ -1397,3 +1406,335 @@ def test_council_13_parallel_fetch_does_not_reuse_fetch_head(q, monkeypatch):
     q.envelope()
     assert q.xq.state(q.repo)['a']['base'] == q.base
     assert not q.git('for-each-ref', '--format=%(refname)', 'refs/xq-fetch/')
+
+
+# v3.2: each regression below was run against v3.1 before implementation.
+def test_n1_local_head_fallback_requires_explicit_main(q, capsys):
+    q.cli('init')
+    q.git('symbolic-ref', '--delete', 'refs/remotes/origin/HEAD')
+    q.git('checkout', '-b', 'feature')
+    q.cli('doctor', '--need', 'cloud')
+    assert 'default branch (local HEAD fallback, origin/HEAD unset): feature' in capsys.readouterr().out
+    q.assign()
+    finish(q)
+    verify(q)
+    before = q.xq.events(q.repo)
+    for args in [('merge', '--id', 'local', '--commit', q.base),
+                 ('cloud-envelope', '--brief', q.brief, '--tasks', 'a')]:
+        with pytest.raises(SystemExit, match='origin/HEAD.*--main.*config'):
+            q.cli(*args)
+        assert q.xq.events(q.repo) == before
+    assert q.cli('merge', '--id', 'local', '--commit', q.base, '--main', 'main') == 0
+    assert q.envelope('a', **{'--main': 'main'}) == 0
+    q.publish({'a': q.report()})
+    with pytest.raises(SystemExit, match='origin/HEAD.*--main.*config'):
+        q.collect()
+    (q.repo / '.agents/config.json').write_text('{"main":"main"}')
+    assert q.collect() == 0
+
+
+def test_n2_resume_last_session_documentation():
+    root = SCRIPT.parents[3]
+    for path in ('docs/codex.md', 'skill/executor-queue/SKILL.md'):
+        text = (root / path).read_text()
+        assert 'only within the same Claude session' in text
+        assert 'launch the -fix1 brief fresh in the same worktree' in text
+
+
+@pytest.mark.parametrize('code', [0, 1, 15])
+def test_n3_plain_delegate_explicit_exit(q, code):
+    q.assign('review', 'agy')
+    out = q.repo / '.agy-bridge/results/review.md'
+    out.parent.mkdir(parents=True)
+    if code == 0:
+        out.write_text('A plain answer, no bridge header.')
+    assert q.cli('agy-sync', '--delegate-exit', 'review=' + str(code), '--out', str(out)) == 0
+    task = q.xq.state(q.repo)['review']
+    assert task['status'] == ('done' if code == 0 else 'failed')
+    assert task['delegate_exit'] == code and task['result'] == str(out)
+    assert not task.get('verdict')
+    assert q.cli('agy-sync') == 0
+
+
+def test_n3_delegate_refuses_relative_out_and_unknown_task(q):
+    q.assign('review', 'agy')
+    before = q.xq.events(q.repo)
+    for tid, out in [('review', 'relative.md'), ('unknown', str(q.repo / 'answer.md'))]:
+        with pytest.raises(SystemExit, match='absolute|running agy'):
+            q.cli('agy-sync', '--delegate-exit', tid + '=1', '--out', out)
+        assert q.xq.events(q.repo) == before
+
+
+def test_n4_surrogateescape_text_args(q):
+    bad = os.fsdecode(b'bad\xff\xfe')
+    clean = b'bad\xff\xfe'.decode('utf-8', errors='replace')
+    assert q.assign('local', 'codex', '--note', bad) == 0
+    assert q.cli('finish', '--id', 'local', '--status', 'done', '--summary', bad) == 0
+    assert q.cli('verify', '--id', 'local', '--by', 'reader', '--verdict', 'pass', '--evidence', bad) == 0
+    rows = q.xq.events(q.repo)
+    assert [rows[0]['note'], rows[1]['summary'], rows[2]['evidence']] == [clean] * 3
+
+
+@pytest.mark.parametrize('extra', [(), ('--queued',)])
+def test_n5_assign_cloud_rejected(q, extra):
+    with pytest.raises(SystemExit, match='cloud-envelope'):
+        q.assign('a', 'cloud', *extra)
+    assert q.xq.events(q.repo) == []
+
+
+@pytest.mark.parametrize('changes', [dict(summary='s' * 2001),
+    dict(tests=[{'cmd': 'c' * 2001, 'result': 'pass'}]),
+    dict(tests=[{'cmd': 'c', 'result': 'r' * 2001}]),
+    dict(tests=[{'cmd': 'c', 'result': 'pass'}] * 101), dict(extra='x' * 65536)])
+def test_n6_report_limits(q, capsys, changes):
+    q.envelope('a')
+    q.publish({'a': q.report(**changes)})
+    before = q.xq.events(q.repo)
+    assert q.collect() == 1
+    assert 'limit' in capsys.readouterr().out
+    assert q.xq.events(q.repo) == before
+
+
+def test_n6_report_hash_and_unknown_keys(q, capsys):
+    q.envelope('a')
+    data = q.report(extra='discard', tests=[{'cmd': 'pytest', 'result': 'pass', 'extra': 'discard'}])
+    q.publish({'a': data})
+    assert q.collect() == 0
+    task = q.xq.state(q.repo)['a']
+    assert re.fullmatch('[0-9a-f]{64}', task['report_sha256'])
+    assert 'extra' not in task['report'] and 'extra' not in task['tests'][0]
+    assert q.collect() == 0
+    # Changing discarded content must still be detected, with implementation head unchanged.
+    data['extra'] = 'changed'
+    q.publish({'a': data})
+    assert q.collect() == 1
+    assert 'CHANGED a:' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('version,warn', [('2.30.9', True), ('2.31.0', False), ('2.47.1.windows.1', False)])
+def test_n7_doctor_git_version(q, monkeypatch, capsys, version, warn):
+    q.cli('init')
+    real = q.xq.run
+    def run(argv, **kwargs):
+        if argv == ['git', '--version']:
+            return subprocess.CompletedProcess(argv, 0, 'git version ' + version, '')
+        return real(argv, **kwargs)
+    monkeypatch.setattr(q.xq, 'run', run)
+    q.cli('doctor', '--need', 'cloud')
+    out = capsys.readouterr().out
+    assert 'git version: ' + version in out
+    assert ('WARN git < 2.31' in out) == warn
+    for path in ('docs/codex.md', 'skill/executor-queue/SKILL.md'):
+        assert 'Git >= 2.31' in (SCRIPT.parents[3] / path).read_text()
+
+
+def test_n3_explicit_delegate_cannot_override_bridge_failure(q):
+    q.assign('review', 'agy')
+    out = q.repo / '.agy-bridge/results/review.md'
+    out.parent.mkdir(parents=True)
+    out.write_text('exit_code: 15\n## Answer\nUntrusted answer')
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='bridge metadata|archive'):
+        q.cli('agy-sync', '--delegate-exit', 'review=0', '--out', str(out))
+    assert q.xq.events(q.repo) == before
+    assert q.cli('agy-sync') == 0
+    assert q.xq.state(q.repo)['review']['status'] == 'failed'
+
+
+@pytest.fixture
+def capacity(q, monkeypatch):
+    readings = dict(load=0.5, cpus=2, repo_free_gb=10.0, temp_free_gb=10.0)
+    counts = dict(codex=0, agy=0)
+    monkeypatch.setattr(q.xq, 'resource_readings', lambda root: readings, raising=False)
+    monkeypatch.setattr(q.xq, 'live_process_counts', lambda: counts, raising=False)
+    return readings, counts
+
+
+@pytest.mark.parametrize('field,value,reason', [
+    ('load', 2.01, 'load'), ('repo_free_gb', 4.99, 'repo free'),
+    ('temp_free_gb', 4.99, 'temp free')])
+def test_n9_preflight_resource_thresholds(q, capacity, capsys, field, value, reason):
+    readings, _ = capacity
+    assert q.cli('preflight', '--executor', 'codex') == 0
+    readings[field] = value
+    assert q.cli('preflight', '--executor', 'codex') == 1
+    assert reason in capsys.readouterr().out
+    readings.update(load=2, repo_free_gb=5, temp_free_gb=5)
+    assert q.cli('preflight', '--executor', 'codex') == 0  # boundaries inclusive
+
+
+@pytest.mark.parametrize('executor,limit', [('codex', 2), ('agy', 1)])
+@pytest.mark.parametrize('source', ['ledger', 'processes', 'both'])
+def test_n9_preflight_counts_max(q, capacity, executor, limit, source, capsys):
+    _, counts = capacity
+    for i in range(limit):
+        q.assign('task' + str(i), executor, *(['--queued'] if source == 'processes' else []))
+    counts[executor] = limit if source != 'ledger' else 0
+    assert q.cli('preflight', '--executor', executor) == 1
+    assert '{} running {}/{}'.format(executor, limit, limit) in capsys.readouterr().out
+    counts[executor] = 0
+    (q.repo / '.agents/config.json').write_text(json.dumps({'limits': {executor: limit + 1}}))
+    assert q.cli('preflight', '--executor', executor) == 0
+
+
+@pytest.mark.parametrize('data', [
+    {'limits': []}, {'limits': {'codex': -1}}, {'limits': {'agy': 1.5}},
+    {'limits': {'codex': True}}, {'limits': {'cloud': 2}},
+    {'min_free_gb': -1}, {'min_free_gb': True}, {'min_free_gb': '5'},
+    {'max_load_per_cpu': 0}, {'max_load_per_cpu': float('nan')},
+    {'min_free_gb': float('inf')}, {'max_load_per_cpu': None},
+    {'min_free_gb': 10**400}, {'max_load_per_cpu': 10**400}])
+def test_n9_config_validation(q, capacity, data):
+    (q.repo / '.agents/config.json').write_text(json.dumps(data))
+    with pytest.raises(SystemExit, match='invalid .agents/config.json'):
+        q.cli('preflight', '--executor', 'codex')
+
+
+def test_n9_custom_resource_limits(q, capacity):
+    readings, _ = capacity
+    readings.update(load=3, repo_free_gb=2, temp_free_gb=2)
+    (q.repo / '.agents/config.json').write_text(json.dumps(
+        {'limits': {'codex': 0}, 'min_free_gb': 1, 'max_load_per_cpu': 2}))
+    assert q.cli('preflight', '--executor', 'agy') == 0
+    assert q.cli('preflight', '--executor', 'codex') == 1
+
+
+@pytest.mark.parametrize('refusal', ['load', 'repo_free_gb', 'temp_free_gb', 'processes'])
+def test_n9_hook_refusal_read_only_unlocked(q, capacity, monkeypatch, capsys, refusal):
+    q.assign('waiting', 'codex', '--queued')
+    readings, counts = capacity
+    if refusal == 'processes':
+        counts['codex'] = 2
+    else:
+        readings[refusal] = 100 if refusal == 'load' else 0
+    before = {p: p.read_bytes() for p in q.repo.rglob('*') if p.is_file()}
+    def no_lock(*args):
+        pytest.fail('hook must stay unlocked')
+    monkeypatch.setattr(q.xq, 'ledger_lock', no_lock)
+    assert q.cli('hook') == 0
+    out = capsys.readouterr().err
+    assert 'preflight refused' in out and 'codex idle' not in out
+    assert before == {p: p.read_bytes() for p in q.repo.rglob('*') if p.is_file()}
+
+
+def test_n9_hook_keeps_verification_guard(q, capacity, capsys):
+    q.assign()
+    finish(q)
+    (q.repo / '.agents/config.json').write_text('{"keep_busy":["codex"]}')
+    capacity[0]['load'] = 100
+    assert q.cli('hook') == 2
+    out = capsys.readouterr().err
+    assert 'not verified' in out and 'preflight refused' in out
+
+
+def test_n9_windows_load_fallback(q, monkeypatch, capsys):
+    monkeypatch.setattr(q.xq, 'resource_readings', q.real_resource_readings)
+    # Test the actual reader while keeping disk and process probes injected.
+    monkeypatch.setattr(q.xq, 'WINDOWS', True)
+    monkeypatch.setattr(q.xq.shutil, 'disk_usage', lambda path: SimpleNamespace(free=10 * 1024**3))
+    monkeypatch.setattr(q.xq, 'live_process_counts', lambda: {'codex': 0, 'agy': 0}, raising=False)
+    def unavailable():
+        pytest.fail('Windows must not call getloadavg')
+    monkeypatch.setattr(q.xq.os, 'getloadavg', unavailable, raising=False)
+    assert q.cli('preflight', '--executor', 'codex') == 0
+    assert 'load average unavailable' in capsys.readouterr().out
+    monkeypatch.setattr(q.xq.shutil, 'disk_usage', lambda path: SimpleNamespace(free=0))
+    assert q.cli('preflight', '--executor', 'codex') == 1
+
+
+def test_n9_doctor_capacity(q, capacity, capsys):
+    q.cli('init')
+    capacity[1]['agy'] = 1
+    q.cli('doctor', '--need', 'cloud')
+    out = capsys.readouterr().out
+    for text in ('load', 'repo free', 'temp free', 'codex running 0/2', 'agy running 1/1'):
+        assert text in out
+
+
+@pytest.mark.parametrize('name,command,expected', [
+    ('codex', '/opt/bin/codex exec --json brief', 'codex'),
+    ('codex.exe', 'codex.exe exec brief', 'codex'),
+    ('node', 'node /plugins/codex-companion.mjs task --background', 'codex'),
+    ('python3', 'python3 /plugins/agy-bridge delegate --file A', 'agy'),
+    ('python3', 'python3 /plugins/agy-bridge queue run --repo /repo', 'agy'),
+    ('agy', 'agy --prompt review', 'agy'),
+    ('node', 'node /plugins/codex-companion.mjs status job', None),
+    ('python3', 'python3 /plugins/agy-bridge queue add job.json', None),
+    ('python3', 'python3 /repo/xq.py preflight --executor codex', None),
+    ('sh', 'sh -c echo codex agy', None),
+    ('codex-helper', 'codex-helper exec', None),
+])
+def test_n9_process_matching(q, monkeypatch, name, command, expected):
+    monkeypatch.setattr(q.xq, 'process_rows', lambda: [(name, command)], raising=False)
+    counts = q.real_live_process_counts()
+    assert counts == {kind: int(kind == expected) for kind in ('codex', 'agy')}
+
+
+def test_n9_resource_reader_both_volumes(q, monkeypatch):
+    seen = []
+    monkeypatch.setattr(q.xq, 'WINDOWS', False)
+    monkeypatch.setattr(q.xq.os, 'getloadavg', lambda: (3, 2, 1), raising=False)
+    monkeypatch.setattr(q.xq.os, 'cpu_count', lambda: 4)
+    def disk(path):
+        seen.append(str(path))
+        return SimpleNamespace(free=(6 if len(seen) == 1 else 7) * 1024**3)
+    monkeypatch.setattr(q.xq.shutil, 'disk_usage', disk)
+    readings = q.real_resource_readings(q.repo)
+    assert readings == dict(load=3, cpus=4, repo_free_gb=6, temp_free_gb=7)
+    assert seen[0] == str(q.repo) and len(seen) == 2
+
+
+def test_n9_mandatory_launch_documentation():
+    text = (SCRIPT.parents[1] / 'SKILL.md').read_text()
+    assert 'Immediately before every Codex launch' in text
+    assert 'preflight --executor codex' in text
+    assert 'immediately before every agy queue run/delegate' in text
+    assert 'preflight --executor agy' in text
+
+
+@pytest.mark.parametrize('artifact', ['queue/review.job', 'results/review.md'])
+def test_n3_explicit_delegate_cannot_bypass_other_bridge_artifact(q, artifact):
+    q.assign('review', 'agy')
+    path = q.repo / '.agy-bridge' / artifact
+    path.parent.mkdir(parents=True)
+    path.write_text('exit_code: 15\n## Answer\nFailure')
+    out = q.repo / 'plain.md'
+    out.write_text('Plain answer')
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='bridge|queue'):
+        q.cli('agy-sync', '--delegate-exit', 'review=0', '--out', str(out))
+    assert q.xq.events(q.repo) == before
+
+
+def test_n9_failed_probes_refuse_and_hook_does_not_demand_work(q, capacity, monkeypatch, capsys):
+    q.assign('waiting', 'codex', '--queued')
+    def unavailable(*args):
+        raise OSError('probe failed')
+    monkeypatch.setattr(q.xq, 'resource_readings', unavailable)
+    monkeypatch.setattr(q.xq, 'live_process_counts', unavailable)
+    assert q.cli('preflight', '--executor', 'codex') == 1
+    assert q.cli('hook') == 0
+    assert 'readings unavailable' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('windows', [False, True])
+def test_n9_process_reader(q, monkeypatch, windows):
+    monkeypatch.setattr(q.xq, 'WINDOWS', windows)
+    def probe(argv, **kw):
+        if windows:
+            assert argv[0] == 'powershell.exe'
+            output = json.dumps({'Name': 'codex.exe', 'CommandLine': 'codex.exe exec task'})
+        else:
+            assert argv == ['ps', '-axo', 'comm=,args=']
+            output = ' /opt/bin/codex /opt/bin/codex exec task\n'
+        return subprocess.CompletedProcess(argv, 0, output, '')
+    monkeypatch.setattr(q.xq, 'run', probe)
+    expected = [('codex.exe', 'codex.exe exec task')] if windows else [('/opt/bin/codex', '/opt/bin/codex exec task')]
+    assert q.xq.process_rows() == expected
+
+
+def test_n6_report_accepts_limits(q):
+    q.envelope('a')
+    q.publish({'a': q.report(summary='s' * 2000,
+        tests=[{'cmd': 'c' * 2000, 'result': 'r' * 2000}] + [{'cmd': 'c', 'result': 'r'}] * 99)})
+    assert q.collect() == 0

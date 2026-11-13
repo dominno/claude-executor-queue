@@ -47,7 +47,7 @@ def ok(result):
 
 def test_default_install_check_and_standalone_version(install, tmp_path):
     out = ok(install.run())
-    assert 'repo version: 3.1.0' in out
+    assert 'repo version: 3.2.0' in out
     assert 'installed version: not installed' in out
     assert (install.target / 'SKILL.md').read_bytes() == (install.repo / 'skill/executor-queue/SKILL.md').read_bytes()
     assert sorted(p.relative_to(install.target).as_posix() for p in install.target.rglob('*') if p.is_file()) == ['SKILL.md', 'scripts/xq.py']
@@ -55,13 +55,13 @@ def test_default_install_check_and_standalone_version(install, tmp_path):
     receipt = install.skills / '.executor-queue-install.json'
     before = receipt.read_bytes(), receipt.stat().st_mtime_ns
     assert 'SHA-256 hashes match' in ok(install.run('--check'))
-    assert 'installed version: 3.1.0' in ok(install.run('--check'))
+    assert 'installed version: 3.2.0' in ok(install.run('--check'))
     assert before == (receipt.read_bytes(), receipt.stat().st_mtime_ns)
     # The installed helper must not need VERSION, docs, the installer or a git repo.
     shutil.rmtree(str(install.repo))
     r = subprocess.run([sys.executable, str(install.target / 'scripts/xq.py'), '--version'],
                        cwd=str(tmp_path), capture_output=True, text=True, timeout=10)
-    assert r.returncode == 0 and r.stdout.strip() == 'xq 3.1.0'
+    assert r.returncode == 0 and r.stdout.strip() == 'xq 3.2.0'
 
 
 def test_custom_skills_dir_install_check_uninstall(install, tmp_path):
@@ -113,12 +113,12 @@ def test_clean_update_uses_saved_hashes_and_prints_both_versions(install):
     ok(install.run())
     for name in ['VERSION', 'skill/executor-queue/SKILL.md', 'skill/executor-queue/scripts/xq.py']:
         p = install.repo / name
-        p.write_text(p.read_text().replace('3.1.0', '3.1.1'))
+        p.write_text(p.read_text().replace('3.2.0', '3.2.1'))
     r = install.run('--check')
     assert r.returncode == 1
-    assert 'repo version: 3.1.1' in r.stdout and 'installed version: 3.1.0' in r.stdout
+    assert 'repo version: 3.2.1' in r.stdout and 'installed version: 3.2.0' in r.stdout
     ok(install.run())
-    assert 'installed version: 3.1.1' in ok(install.run('--check'))
+    assert 'installed version: 3.2.1' in ok(install.run('--check'))
 
 
 def test_uninstall_clean_old_copy_even_after_repo_changes(install):
@@ -193,7 +193,7 @@ def test_release_markers_and_python38_installer_syntax():
     assert len(skill.splitlines()) <= 110
     assert '\nversion: ' + version + '\n' in skill
     assert '— ' + version + ' —' in (ROOT / 'CHANGELOG.md').read_text()
-    assert '# v' + version in (ROOT / 'docs/v3.1-notes.md').read_text()
+    assert '# v' + version in (ROOT / 'docs/v3.2-notes.md').read_text()
     frontmatter = skill.split('---', 2)[1]
     assert 'version:' not in frontmatter
     for name in ('scripts/install.py', 'skill/executor-queue/scripts/xq.py'):
