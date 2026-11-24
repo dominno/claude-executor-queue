@@ -71,3 +71,12 @@ git diff --check
 ```
 
 See the [changelog](CHANGELOG.md) and [3.6 release notes](docs/v3.6-notes.md) for version changes. The project is released under the [MIT license](LICENSE). Use the [security policy](SECURITY.md) to report a vulnerability.
+
+### Add a new executor connector
+
+Connectors are built into [`xq.py`](skills/executor-queue/scripts/xq.py). Use `sync_agy()` as a reference for reading local artifacts, `poll_codex()` for querying a job by ID, or `cmd_cloud_collect()` for importing reports published through Git.
+
+1. **Define the workflow.** Choose a stable executor ID and decide how to match a queue task to the provider's job or result. Specify which files and destinations the user approves, where outputs are stored, and what evidence shows that a job finished. Add private output paths to `PRIVATE_PATHS` and to the tracked-file check in `exclude_private()`. Use `assign` for ordinary task registration or follow `cloud-envelope` if the workflow needs to pin a brief and a base commit first.
+2. **Wire up the CLI.** Add the ID to `EXECUTORS` for `status`, configuration and the shared commands. Add dependency checks to `doctor()` and preserve its `--offline` behavior. For local capacity limits, update `LOCAL_EXECUTOR_LIMITS`, `live_process_counts()`, `preflight` and the capacity checks in `cmd_hook()`. If tasks require Git integration, update `INTEGRATING_EXECUTORS` and follow the checks in `cmd_verify()` and `cmd_merge()` to bind approval to the delivered commit.
+3. **Collect results explicitly.** For a pollable executor, update the `poll` choices in `main()` and routing in `cmd_poll()` so `--id` and `--executor` only refresh the selected tasks. Use `snapshot()` and `append_checked()` to guard against a concurrent reassignment or finish. Record unknown or unavailable results as observations, and write `finish` only with confirmed terminal evidence. Keep `status` ledger-only and leave the verdict to an independent `verify` step. [Status and refresh contract](docs/job-status.md)
+4. **Document and test the workflow.** Update `SKILL.md` with setup, allowed inputs, dispatch and result review steps. Link the setup guide from the executor table above. Use fake provider responses or local artifacts to test offline checks, scoped refresh, terminal evidence, missing or malformed results, and `status --executor <executor> --json`. [Skill instructions](skills/executor-queue/SKILL.md) · [CLI test examples](tests/test_xq.py)
