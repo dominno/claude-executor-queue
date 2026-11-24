@@ -26,15 +26,21 @@ restricted network policy, and **no secrets in environment settings**. Try one s
    task order and branch, even if the brief has been removed locally. Include explicit user authorization for the exact push URL and the named session branch
    in the `/goal` message. In the session, verify that `git remote get-url --push --all origin` resolves to one approved URL,
    the current branch matches the approved `claude/` branch, and origin is not configured as a mirror. Keep credentials out
-   of the transcript. Review all outgoing commits and sensitive paths before publishing. With `session_branch` set to the
-   checked branch, push the single approved ref:
+   of the transcript. Review all outgoing commits and sensitive paths before publishing. Check the effective pre-push
+   hook, including `core.hooksPath`, and the files and endpoints it accesses. For Git LFS inspect the payload and upload
+   configuration, including `.lfsconfig`, `remote.origin.lfspushurl` and `lfs.pushurl`. Get separate approval for any hook
+   transfer beyond the approved Git push. Stop if you cannot establish the scope. Keep the hooks in place.
+   With `session_branch` set to the checked branch, push the single approved ref:
    `git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch"`.
 4. `xq.py cloud-collect --branch claude/<session> [--batch <batch>]`, or `--discover` to inspect origin's `claude/*` refs.
    Fetches only. Validate all reports in each batch before importing that batch: schema, branch, pinned fork point, task commit and distinct head.
    Network Git disables terminal prompts and times out after five minutes per operation.
+   If a discovered branch cannot be fetched, discovery reports the failure and exits nonzero after collecting valid results from independent branches.
    MISSING/CHANGED/PROBLEM requires explicit reconciliation; collection does not overwrite a prior imported result.
-   WARN SENSITIVE lists instruction basenames at any depth, hooks, CI, lockfiles, config, briefs, other status files and added symlinks, including rename deletions.
-   Inspect these warnings before testing; they do not change a successful collection exit code. Diffs cover each task base..head plus head..session-tip, so status/later commits cannot hide authority changes. `finish --status failed` cancels each running batch id locally; it cannot
+   WARN SENSITIVE lists instruction basenames at any depth, hooks, CI, lockfiles, config, briefs, other status files and symlink changes, including rename deletions.
+   The scan covers each commit between the pinned base and the session tip, including paths restored by a later commit.
+   Inspect these warnings before testing. They do not affect the collection exit code.
+   `finish --status failed` cancels each running batch id locally; it cannot
    stop a remote session, so tell the user to stop it there. For an already imported result, `finish --id <id> --status failed --force --summary "local cancellation: ..."`
    records reconciliation and clears its stored report/approval. `cloud-collect` itself has no `--force` option.
 5. Inspect untrusted diffs before applying or testing. Use a fresh **verify-<batch>** worktree from the pinned base.
@@ -46,10 +52,11 @@ restricted network policy, and **no secrets in environment settings**. Try one s
 
 
 Discovery considers only refs beginning `refs/heads/claude/`, skips foreign IDs, and applies `--batch`
-before report validation. Explicit branches must start `claude/`; an unknown ID remains a hard error there.
-Each new envelope has its own batch identity. The brief name is available as a filter and can match multiple envelopes.
-A bound task reported on another branch is a PROBLEM. An unbound task requires status.branch to match
-and exactly one reporting branch; stop/cancel stale sessions locally rather than importing conflicting work.
+before report validation. The collector skips earlier sessions' reports carried into a session unchanged from its pinned base.
+Explicit branches must start `claude/`. A new report for an unknown ID remains an error on an explicit branch.
+Each new envelope has its own batch identity and uses one session branch for all tasks.
+The brief name is available as a filter and can match multiple envelopes. A report must name the fetched branch
+in `status.branch`. Stop or cancel stale sessions before retrying work on another branch.
 A cancelled task no longer blocks discovery through cross-branch fingerprint checks. Invalid reports block
 only their own batch; a changed imported report still requires explicit reconciliation.
 

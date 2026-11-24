@@ -14,6 +14,10 @@ Adapt named files, checks and IDs before use; these examples do not launch jobs.
 Ask the user before adding a Stop hook. Merge the snippet into the existing
 project `.claude/settings.json`. Both snippets find the project-scoped skill using
 `$CLAUDE_PROJECT_DIR` and skip the hook when its helper is absent.
+When you start a new Claude Code session in a linked worktree, the project path
+can point to that worktree. To run the hook there, make its settings available
+in that checkout and install the skill there or configure the hook to use your
+globally installed helper. Both installations read the shared project ledger.
 
 For a global install, set `f` to the helper path under your active Claude Code
 profile, usually `$HOME/.claude/skills/executor-queue/scripts/xq.py`. If your path

@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 
-VERSION = '3.4.0'
+VERSION = '3.5.0'
 REPORT_MAX_BYTES = 65536
 REPORT_MAX_TEXT = 2000
 REPORT_MAX_TESTS = 100
@@ -85,10 +85,25 @@ def safe_path(path):
         fail('unsafe symlink: ' + str(path))
 
 
-def safe_open(path, flags, mode='a+b'):
+def safe_open(path, flags, mode='a+b', **options):
     safe_path(path)
-    fd = os.open(str(path), flags | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-    return os.fdopen(fd, mode)
+    error = 'expected a regular file: ' + str(path)
+    try:
+        file_mode = path.lstat().st_mode
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(file_mode):
+            raise OSError(error)
+    flags |= getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(error)
+    except OSError:
+        os.close(fd)
+        raise
+    return os.fdopen(fd, mode, **options)
 
 
 def exclude_private(root, local=False):
@@ -104,7 +119,11 @@ def exclude_private(root, local=False):
     if tracked:
         fail('private state is tracked; remove it from the index before continuing: ' + tracked)
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text(encoding='utf-8') if exclude.exists() else ''
+    try:
+        with safe_open(exclude, os.O_RDONLY, 'r', encoding='utf-8') as stream:
+            existing = stream.read()
+    except FileNotFoundError:
+        existing = ''
     missing = [x for x in lines if x not in existing.split('\n')]
     if missing:
         with safe_open(exclude, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 'a') as fh:
@@ -216,34 +235,38 @@ def append(root, event):
 
 
 def events(root):
-    path = ledger_path(root)
-    safe_path(path)
-    if not path.exists():
-        return []
     rows = []
-    for number, line in enumerate(path.read_text(encoding='utf-8', errors='replace').split('\n'), 1):
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-            if isinstance(value, dict) and value.get('event') == 'batch' and 'id' not in value:
-                records = value.get('events')
-                if not isinstance(records, list) or len(records) < 2:
-                    raise ValueError('expected a batch with at least two events')
-            else:
-                records = [value]
-            if any(not isinstance(record, dict) or not isinstance(record.get('id'), str) or not record['id']
-                   for record in records):
-                raise ValueError('expected object with id')
-            rows.extend(records)
-        except (ValueError, RecursionError):
-            print('xq: corrupt ledger line {} ignored'.format(number), file=sys.stderr)
+    try:
+        with safe_open(ledger_path(root), os.O_RDONLY, 'r', encoding='utf-8', errors='replace') as stream:
+            for number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                    if isinstance(value, dict) and value.get('event') == 'batch' and 'id' not in value:
+                        records = value.get('events')
+                        if not isinstance(records, list) or len(records) < 2:
+                            raise ValueError('expected a batch with at least two events')
+                    else:
+                        records = [value]
+                    if any(not isinstance(record, dict) or not isinstance(record.get('id'), str) or not record['id']
+                           for record in records):
+                        raise ValueError('expected object with id')
+                    rows.extend(records)
+                except (ValueError, RecursionError):
+                    print('xq: corrupt ledger line {} ignored'.format(number), file=sys.stderr)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        fail('cannot read ledger: ' + str(exc))
     return rows
 
 
-def state(root):
+def state(root, *, rows=None):
     tasks = {}
-    for e in events(root):
+    if rows is None:
+        rows = events(root)
+    for e in rows:
         tid = e['id']
         kind = e.get('event')
         if kind == 'assign':
@@ -258,7 +281,7 @@ def state(root):
             if kind == 'verify' and t.get('status') in ('running', 'queued'):
                 continue  # Forced early audit events never approve a delivery.
             if kind == 'finish':
-                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'tests'):
+                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'delivery_base', 'tests'):
                     t.pop(key, None)
                 if not e.get('preserve_closed'):
                     # Historical forced finishes reopened the task.
@@ -292,9 +315,9 @@ def valid_branch(name, root):
 
 def config(root):
     path = root / '.agents/config.json'
-    safe_path(path)
     try:
-        data = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+        with safe_open(path, os.O_RDONLY, 'r', encoding='utf-8') as stream:
+            data = json.load(stream)
         if not isinstance(data, dict):
             raise ValueError()
         for key in ('keep_busy', 'paused'):
@@ -313,7 +336,11 @@ def config(root):
         if 'main' in data and (not isinstance(data['main'], str) or not data['main']):
             raise ValueError()
         return data
-    except (ValueError, OSError, OverflowError):
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        fail('cannot read .agents/config.json: ' + str(exc))
+    except (ValueError, OverflowError, RecursionError):
         fail('invalid .agents/config.json (keep_busy/paused: executor lists; limits: codex/agy nonnegative integers; '
              'min_free_gb: finite nonnegative number; max_load_per_cpu: finite positive number; main: branch string)')
 
@@ -481,8 +508,12 @@ def cmd_assign(a):
         fail('assign --executor cloud is unsupported; use cloud-envelope to pin a pushed brief and base')
     root = repo_root()
     valid_id(a.id)
-    known = state(root)
+    rows = events(root)
+    known = state(root, rows=rows)
     check_id_collision(a.id, known)
+    if any(row.get('event') == 'assign' and row.get('executor') == 'cloud' and
+           row['id'].casefold() == a.id.casefold() for row in rows):
+        fail(a.id + ' was assigned to Cloud; use a fresh task id')
     previous = known.get(a.id, {})
     if previous.get('status') == 'running':
         fail(a.id + ' is already running')
@@ -507,15 +538,27 @@ def cmd_assign(a):
         fail(a.id + ' is finished but unverified; verify it or use --force to start a new attempt')
     if a.job and not a.worktree:
         fail('--job requires --worktree')
+    if a.job and a.queued:
+        fail('--queued cannot be combined with --job')
     if a.worktree and (not Path(a.worktree).is_absolute() or not Path(a.worktree).is_dir()):
         fail('--worktree must be an existing absolute directory')
+    worktree = str(Path(a.worktree).resolve()) if a.worktree else None
+    if a.executor == 'codex' and a.job and any(
+            task.get('executor') == 'codex' and task.get('status') in ('running', 'queued') and
+            task.get('job') == a.job and task.get('worktree') and
+            os.path.normcase(str(Path(task['worktree']).resolve())) == os.path.normcase(worktree)
+            for task in known.values()):
+        fail('Codex job and worktree already registered to an active task')
     brief = Path(a.brief)
     if not brief.is_absolute():
         brief = root / brief
     if not brief.is_file():
         fail('brief not found: ' + str(brief))
-    append(root, dict(event='assign', id=a.id, executor=a.executor, brief=str(brief.resolve()),
-                      note=a.note or '', job=a.job, worktree=a.worktree, queued=a.queued, force=a.force))
+    event = dict(event='assign', id=a.id, executor=a.executor, brief=str(brief.resolve()),
+                 note=a.note or '', job=a.job, worktree=worktree, queued=a.queued, force=a.force)
+    if a.executor == 'codex' and a.job:
+        event['codex_project'] = str(plugin_project_root() or root)
+    append(root, event)
     return 0
 
 
@@ -536,6 +579,13 @@ def cmd_finish(a):
     root = repo_root()
     task = require_task(root, a, ('running', 'queued'), 'finish')
     event = dict(event='finish', id=a.id, status=a.status, summary=(a.summary or '')[:2000], force=a.force)
+    successful_codex = task.get('executor') == 'codex' and a.status == 'done'
+    if a.head and (not successful_codex or not a.force):
+        fail('finish --head requires --force and a successful Codex task')
+    if a.head:
+        event['head'] = resolve_commit(root, a.head)
+    elif successful_codex and not task.get('closed'):
+        event.update(codex_delivery(root, task))
     if task.get('closed'):
         event['preserve_closed'] = True
     append(root, event)
@@ -546,6 +596,22 @@ def resolve_commit(root, ref):
     if ref.startswith('-'):
         fail('invalid commit')
     return git('rev-parse', '--verify', ref + '^{commit}', cwd=root).strip()
+
+
+def codex_delivery(root, task):
+    checkout = task.get('worktree') or root
+    common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=checkout).strip()
+    root_common = git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=root).strip()
+    if Path(common).resolve() != Path(root_common).resolve():
+        fail('Codex worktree belongs to a different repository')
+    status = git('status', '--porcelain=v2', '--branch', '--untracked-files=normal',
+                 '--ignore-submodules=none', cwd=checkout).splitlines()
+    prefix = '# branch.oid '
+    head = next((line[len(prefix):] for line in status if line.startswith(prefix)), '')
+    if not SHA_RE.fullmatch(head):
+        fail('Codex worktree needs an initial commit')
+    dirty = any(line and not line.startswith('# ') for line in status)
+    return {'delivery_base' if dirty else 'head': head}
 
 
 def cmd_verify(a):
@@ -559,14 +625,29 @@ def cmd_verify(a):
     if reader.casefold() in EXECUTORS and not a.force:
         fail('--by must name a different reader, not an executor name')
     delivery = t.get('head')
+    pin_delivery = False
+    if not a.force and t.get('executor') == 'codex' and t.get('status') == 'done' and not delivery:
+        base = t.get('delivery_base')
+        if not base:
+            fail('Codex delivery has no recorded commit; reconcile with finish --force --head')
+        if not a.head:
+            fail('commit the Codex worktree delivery, then verify with --head <reviewed commit>')
+        delivery = codex_delivery(root, t).get('head')
+        if not delivery or delivery == base or not ancestor(base, delivery, root):
+            fail('Codex delivery requires a clean worktree at a commit descended from its recorded base')
+        pin_delivery = True
     head = a.head or delivery or git('rev-parse', 'HEAD', cwd=t.get('worktree') or root).strip()
     head = resolve_commit(root, head)
-    if not a.force and a.head and t.get('executor') == 'cloud' and delivery:
+    if not a.force and a.head and t.get('executor') in ('cloud', 'codex') and delivery:
         if head != resolve_commit(root, delivery):
-            fail('verification head must match the collected cloud delivery head; '
+            label = 'collected cloud' if t.get('executor') == 'cloud' else 'recorded Codex'
+            fail('verification head must match the ' + label + ' delivery head; '
                  'use --force for explicit reconciliation')
-    append(root, dict(event='verify', id=a.id, by=reader, verdict=a.verdict, evidence=evidence[:8000],
-                      verified_head=head, force=a.force))
+    event = dict(event='verify', id=a.id, by=reader, verdict=a.verdict, evidence=evidence[:8000],
+                 verified_head=head, force=a.force)
+    if pin_delivery:
+        event['head'] = head
+    append(root, event)
     return 0
 
 
@@ -583,6 +664,10 @@ def cmd_merge(a):
     if not a.force:
         if not head or not ancestor(head, sha, root):
             fail('merge commit must contain the verified head')
+        if t.get('executor') == 'codex' and (
+                not t.get('head') or resolve_commit(root, head) != resolve_commit(root, t['head'])):
+            fail('verified head must match the recorded Codex delivery head; '
+                 'reconcile with finish --force --head or use merge --force')
         if t.get('executor') == 'cloud' and t.get('head'):
             if resolve_commit(root, head) != resolve_commit(root, t['head']):
                 fail('verified head must match the collected cloud delivery head; verify it again '
@@ -749,7 +834,12 @@ def version_key(path):
     return tuple((1, int(p)) if p.isdigit() else (0, p) for p in re.split(r'(\d+)', str(path)))
 
 
-def plugin_binary(kind):
+def plugin_project_root():
+    project = os.environ.get('XQ_ROOT') or git('rev-parse', '--show-toplevel', check=False).strip()
+    return Path(project).expanduser().resolve() if project else None
+
+
+def plugin_binary(kind, *, project=None):
     config_dir = Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
     home = config_dir / 'plugins'
     relative = 'scripts/codex-companion.mjs' if kind == 'codex' else 'bin/agy-bridge'
@@ -770,8 +860,7 @@ def plugin_binary(kind):
         return None
     if not isinstance(data, dict):
         return None
-    project = os.environ.get('XQ_ROOT') or git('rev-parse', '--show-toplevel', check=False).strip()
-    worktree = Path(project).expanduser().resolve() if project else None
+    worktree = Path(project).resolve() if project is not None else plugin_project_root()
     priority = {None: 0, 'user': 0, 'managed': 0, 'project': 1, 'local': 2}
     for marketplace in marketplaces:
         entries = data.get(kind + '@' + marketplace, [])
@@ -869,12 +958,15 @@ def doctor(a):
         check('Codex plugin', cc, cc or '/plugin marketplace add openai/codex-plugin-cc; /plugin install codex@openai-codex')
         if cc:
             print(shell_assignment('CC', cc))
-            r = run(['node', cc, 'setup', '--json'])
-            try:
-                auth = json.loads(r.stdout).get('auth', {}).get('loggedIn')
-            except (ValueError, AttributeError):
-                auth = False
-            check('Codex auth', r.returncode == 0 and auth is True, 'codex login (or codex login --device-auth), then /codex:setup')
+            if a.offline:
+                print('SKIP Codex auth (--offline)')
+            else:
+                r = run(['node', cc, 'setup', '--json'])
+                try:
+                    auth = json.loads(r.stdout).get('auth', {}).get('loggedIn')
+                except (ValueError, AttributeError):
+                    auth = False
+                check('Codex auth', r.returncode == 0 and auth is True, 'codex login (or codex login --device-auth), then /codex:setup')
     else:
         print('SKIP codex (not requested)')
     if 'agy' in needed:
@@ -886,9 +978,14 @@ def doctor(a):
             if agyb:
                 print(shell_assignment('AGYB', agyb))
                 command = bridge_command(agyb)
-                probe = run(command + ['doctor', '--repo', str(root)], timeout=60)
-                check('agy-bridge doctor', probe.returncode == 0,
-                      'checks Python, CLI version and model access in the bridge environment; see /agy:doctor')
+                doctor_args = ['doctor', '--repo', str(root)]
+                if a.offline:
+                    doctor_args.append('--offline')
+                probe = run(command + doctor_args, timeout=60)
+                detail = ('local Python and CLI checks only (authentication and model access skipped with --offline)'
+                          if a.offline else
+                          'checks Python, CLI version and model access in the bridge environment; see /agy:doctor')
+                check('agy-bridge doctor', probe.returncode == 0, detail)
                 if probe.stdout.strip():
                     print(probe.stdout.rstrip())
                 for feature in ('queue', 'verdict'):
@@ -1049,7 +1146,14 @@ def cmd_agy_sync(a):
 
 def cmd_poll(a):
     root = repo_root()
-    cc = plugin_binary('codex')
+    caller_project = plugin_project_root()
+    companions = {}
+
+    def companion(project):
+        if project not in companions:
+            companions[project] = plugin_binary('codex', project=project)
+        return companions[project]
+
     problem = False
     rows = []
     known, stamp = snapshot(root)
@@ -1057,20 +1161,31 @@ def cmd_poll(a):
         if t.get('executor') != 'codex' or t.get('status') != 'running':
             continue
         closed = t.get('closed')
-        if not cc or not t.get('job') or not t.get('worktree'):
+        registered_project = t.get('codex_project')
+        projects = [Path(registered_project)] if registered_project else [root]
+        if not registered_project and caller_project and caller_project != root:
+            projects.insert(0, caller_project)
+        candidates = [companion(project) for project in projects] if t.get('job') and t.get('worktree') else []
+        candidates = list(dict.fromkeys(cc for cc in candidates if cc))
+        if not candidates:
             if closed:
                 continue  # The slot remains occupied until terminal evidence is available.
             print('PROBLEM {}: missing companion/job/worktree; reconcile manually'.format(tid))
             problem = True
             continue
-        args = ['node', cc]
-        r = run(args + ['status', t['job'], '--cwd', t['worktree'], '--json'])
-        try:
-            data = json.loads(r.stdout)
-            status = data['job']['status']
-        except (ValueError, KeyError, TypeError):
-            status = None
-        if r.returncode or status not in ('running', 'queued', 'completed', 'done', 'failed', 'cancelled', 'canceled', 'error'):
+        for cc in candidates:
+            args = ['node', cc]
+            r = run(args + ['status', t['job'], '--cwd', t['worktree'], '--json'])
+            try:
+                data = json.loads(r.stdout)
+                status = data['job']['status']
+            except (ValueError, KeyError, TypeError):
+                status = None
+            usable = not r.returncode and status in (
+                'running', 'queued', 'completed', 'done', 'failed', 'cancelled', 'canceled', 'error')
+            if usable:
+                break
+        if not usable:
             print('PROBLEM {}: invalid/unavailable job status; reconcile before retry'.format(tid))
             problem = True
             continue
@@ -1089,7 +1204,15 @@ def cmd_poll(a):
             print('PROBLEM {}: result unavailable; reconcile manually'.format(tid))
             problem = True
             continue
-        rows.append(dict(event='finish', id=tid, status=terminal, summary=result.stdout.strip()[:2000]))
+        event = dict(event='finish', id=tid, status=terminal, summary=result.stdout.strip()[:2000])
+        if terminal == 'done':
+            try:
+                event.update(codex_delivery(root, t))
+            except SystemExit as exc:
+                print('PROBLEM {}: {}'.format(tid, exc))
+                problem = True
+                continue
+        rows.append(event)
     append_checked(root, rows, stamp)
     return max(1 if problem else 0, cmd_agy_sync(a))
 
@@ -1145,11 +1268,15 @@ def envelope_text(ids, brief, base, main, branch):
    Stop if origin is configured as a mirror or if the approval, URL or branch cannot be confirmed.
    Before pushing, inspect all outgoing commits, paths, blob sizes and credential matches. Report a problem
    without exposing credential text. Stop rather than publishing sensitive or out-of-scope files.
+   Inspect the effective pre-push hook, including core.hooksPath. Check the Git LFS upload endpoints and
+   actual LFS payloads, including remote.origin.lfspushurl, lfs.pushurl and .lfsconfig. A Git URL and
+   branch approval alone does not authorize another transfer. Stop if hook effects cannot be confirmed
+   or any endpoint or payload lacks explicit approval. Keep the hooks in place.
    Push only the confirmed ref: git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch".
    Continue in order after individual failed/blocked tasks. Stop if an authorized push fails twice.
-4) Limit network access to authorized Git operations on that origin. Keep credentials and secrets out of
-   task input, output and the execution environment outside Git's authorized transport. Report blocked if a task needs
-   secrets, another network service, or a paid API. Read/write only this clone, excluding .env* and credentials.
+4) Limit network access to authorized Git operations on that origin and separately approved hook transfers from step 3.
+   Keep credentials and secrets out of task input, output and the execution environment outside authorized transports.
+   Report blocked if a task needs secrets, any additional service, or a paid API. Read/write only this clone, excluding .env* and credentials.
    Preserve tests/gates; no settings/hooks changes beyond the brief. Do not open PRs or push other branches.
 The pushed session branch is the result. A local finish --status failed cancels a task/batch assignment;
 reconcile before collecting cancelled work. Review each task independently; nothing here authorizes a merge.'''
@@ -1325,22 +1452,44 @@ def validate_report(data, tid, t, ref, root, branch):
     return reasons
 
 
+def cloud_status_entries(root, ref):
+    entries = {}
+    output = git('ls-tree', '-r', '-z', ref, '--', STATUS_DIR, cwd=root)
+    for entry in filter(None, output.split('\0')):
+        metadata, path = entry.split('\t', 1)
+        if path.endswith('.json'):
+            mode, kind, blob = metadata.split()
+            entries[path] = (mode, kind, blob)
+    return entries
+
+
+def history_paths(root, base, head, *pathspec):
+    # Separate merge-parent diffs and both sides of renames expose paths that
+    # changed in any outgoing commit, even when the tip restores the old tree.
+    output = git('log', '--format=', '--raw', '--no-renames', '-m', '--full-history', '-z',
+                 base + '..' + head, '--', *pathspec, cwd=root).split('\0')
+    paths, symlinks = set(), set()
+    for metadata, path in zip(output[::2], output[1::2]):
+        old_mode, new_mode, *_ = metadata.lstrip('\n:').split()
+        paths.add(path)
+        if '120000' in (old_mode, new_mode):
+            symlinks.add(path)
+    return paths, symlinks
+
+
 def sensitive_paths(root, base, head, tid, brief=None, cache=None):
-    # --no-renames exposes both sides of renames as deletion/addition paths.
     if cache is None:
         cache = {}
     key = (base, head)
     if key not in cache:
-        entries = git('diff', '--name-status', '--no-renames', '-z', base, head, cwd=root).split('\0')
-        changed = [entries[i + 1] for i in range(0, len(entries) - 1, 2)]
-        modes = git('ls-tree', '-r', '-z', head, cwd=root).split('\0')
-        symlinks = {entry.split('\t', 1)[1] for entry in modes if entry.startswith('120000 ') and '\t' in entry}
-        cache[key] = (changed, symlinks)
+        changed, symlinks = history_paths(root, base, head)
+        cache[key] = (sorted(changed), symlinks)
     changed, symlinks = cache[key]
     result = []
     for path in changed:
         name = Path(path).name
-        sensitive = (path == brief or name in ('AGENTS.md', 'CLAUDE.md', '.mcp.json', 'Makefile', 'GNUmakefile', 'makefile',
+        sensitive = (path == brief or name in ('AGENTS.md', 'CLAUDE.md', '.mcp.json', '.gitattributes', '.lfsconfig',
+                               'Makefile', 'GNUmakefile', 'makefile',
                                'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'Pipfile.lock',
                                'poetry.lock', 'uv.lock', 'Cargo.lock', 'Gemfile.lock', 'composer.lock',
                                'bun.lockb', 'npm-shrinkwrap.json', 'packages.lock.json', 'go.sum') or
@@ -1375,8 +1524,12 @@ def cmd_cloud_collect(a):
     main = require_main(root, a.main) if cloud else None
     seen, pending, fingerprints = set(), [], {}
     bad, diffs, warned = {}, {}, set()
+    fetched, fetch_errors, base_entries = set(), set(), {}
+    batch_branches = {}
     historical = {}
     for tid, task in tasks.items():
+        if task.get('executor') == 'cloud' and task.get('batch_id') and task.get('branch'):
+            batch_branches.setdefault(task['batch_id'], set()).add(task['branch'])
         head = recorded_cloud_delivery(task)
         if head:
             canonical = head if len(head) == len(task.get('base') or '') else cloud_commit(root, head)
@@ -1400,12 +1553,36 @@ def cmd_cloud_collect(a):
                 warned.add(path)
 
     for branch in branches:
-        ref = fetch_branch(branch, root)
-        names = git('ls-tree', '-r', '-z', '--name-only', ref, '--', STATUS_DIR, cwd=root).split('\0')
-        for name in filter(None, names):
-            if not name.endswith('.json'):
+        try:
+            ref = fetch_branch(branch, root)
+        except SystemExit:
+            if not a.discover:
+                raise
+            fetch_errors.add(branch)
+            # Transport diagnostics may include private origin URLs.
+            print('PROBLEM {}: could not fetch discovered branch'.format(display_cloud_name(branch)))
+            continue
+        fetched.add(branch)
+        entries = cloud_status_entries(root, ref)
+        bases = {task['base'] for tid, task in cloud.items() if task.get('base') and
+                 (task.get('branch') == branch or (not task.get('branch') and STATUS_DIR + '/' + tid + '.json' in entries))}
+        branch_history = {}
+        for base in sorted(bases):
+            if not ancestor(base, ref, root):
                 continue
+            if base not in base_entries:
+                base_entries[base] = cloud_status_entries(root, base)
+            if any(base_entries[base].get(name) == entry for name, entry in entries.items()):
+                branch_history[base], _ = history_paths(root, base, ref, STATUS_DIR)
+        for name, entry in entries.items():
             tid = Path(name).stem
+            t = cloud.get(tid)
+            # A merged session may leave its reports in the base of later
+            # sessions. Check owned reports and skip only untouched carryovers.
+            if (t is None or t.get('branch') != branch) and any(
+                    name not in changed and base_entries[base].get(name) == entry
+                    for base, changed in branch_history.items()):
+                continue
             if tid in tasks and tid not in cloud and tasks[tid].get('executor') == 'cloud':
                 continue  # Ignore closed and unselected tasks before validating remote data.
             if tid not in cloud and a.discover:
@@ -1414,7 +1591,6 @@ def cmd_cloud_collect(a):
             if name != STATUS_DIR + '/' + tid + '.json' or not ID_RE.fullmatch(tid):
                 bad.setdefault('*', []).append('PROBLEM {}: invalid status path'.format(display_cloud_name(name)))
                 continue
-            t = cloud.get(tid)
             if t is None:
                 bad.setdefault('*', []).append('PROBLEM {}: status file but no assign in the ledger'.format(tid))
                 continue
@@ -1425,7 +1601,10 @@ def cmd_cloud_collect(a):
             if t.get('branch') and t['branch'] != branch:
                 problem(tid, 'PROBLEM {}: report on {} but bound to {}'.format(tid, branch, t['branch']))
                 continue
-            blob = ref + ':' + name
+            mode, kind, blob = entry
+            if kind != 'blob' or mode not in ('100644', '100755'):
+                problem(tid, 'PROBLEM {}: status path must be a regular file'.format(tid))
+                continue
             size = int(git('cat-file', '-s', blob, cwd=root).strip())
             if size > REPORT_MAX_BYTES:
                 problem(tid, 'PROBLEM {}: report file size limit exceeded (65536 bytes)'.format(tid))
@@ -1438,8 +1617,11 @@ def cmd_cloud_collect(a):
                 continue
             if t.get('status') != 'running':
                 if t.get('report_sha256', report_hash(t['report'])) != report_sha256:
+                    status = data.get('status') if isinstance(data, dict) else None
+                    if status not in ('done', 'failed', 'blocked'):
+                        status = '?'
                     problem(tid, 'CHANGED {}: {} -> {} (report differs; reconcile explicitly)'.format(
-                        tid, t.get('status'), data.get('status') if isinstance(data, dict) else '?'))
+                        tid, t.get('status'), status))
                 else:
                     head = cloud_commit(root, t.get('head'))
                     if not head or not ancestor(head, ref, root):
@@ -1473,21 +1655,30 @@ def cmd_cloud_collect(a):
                     problem(tid, 'CHANGED {}: conflicting reports across session branches; unbound reports require one branch'.format(tid))
                 continue
             fingerprints[tid] = fingerprint
+            if t.get('batch_id'):
+                batch_branches.setdefault(t['batch_id'], set()).add(branch)
             pending.append(dict(event='finish', id=tid, status=data['status'], summary=data['summary'],
                                 head=head, tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch))
-    batches = {group(tid) for tid, t in cloud.items() if tid in seen or t.get('branch') in branches}
-    if a.batch and (a.discover or not batches):
+    for row in pending:
+        tid = row['id']
+        destinations = batch_branches.get(cloud[tid].get('batch_id'), set())
+        if len(destinations) > 1:
+            problem(tid, 'PROBLEM {}: one envelope must use a single session branch'.format(tid))
+    batches = {group(tid) for tid, t in cloud.items() if tid in seen or t.get('branch') in fetched}
+    if a.batch and (a.discover or not batches) and (fetched or not fetch_errors):
         batches.update(group(tid) for tid in cloud)
     for tid, t in cloud.items():
         if a.branch and t.get('branch') and t['branch'] not in branches and tid not in seen:
             print('UNCOLLECTED {}: bound to {} (not selected)'.format(tid, t['branch']))
     relevant = {tid: t for tid, t in cloud.items()
-                if tid in seen or t.get('branch') in branches or
+                if tid in seen or t.get('branch') in fetched or
                 (a.discover and t.get('branch')) or (not t.get('branch') and group(tid) in batches)}
     for tid, t in relevant.items():
-        if tid not in seen and t.get('status') == 'running':
+        if t.get('branch') in fetch_errors:
+            problem(tid, 'PROBLEM {}: assigned session branch could not be fetched'.format(tid))
+        elif tid not in seen and t.get('status') == 'running':
             problem(tid, 'MISSING ' + tid)
-        elif tid not in seen and t.get('report') and t.get('branch') in branches:
+        elif tid not in seen and t.get('report') and t.get('branch') in fetched:
             problem(tid, 'CHANGED {}: recorded report is missing from {}'.format(tid, t['branch']))
     # Atomic per batch: a malformed peer blocks its own batch, not unrelated work.
     def check_distinct_heads(rows, within_batch):
@@ -1533,7 +1724,7 @@ def cmd_cloud_collect(a):
         counts[status] = counts.get(status, 0) + 1
     print('cloud progress: ' + (', '.join('{} {}'.format(k, v) for k, v in sorted(counts.items())) or 'no cloud tasks'))
     print('Next: inspect untrusted diffs before tests; verify each task in verify-<batch>, record independent verdicts; merge accepted tasks only with user authorization.')
-    return 1 if bad else 0
+    return 1 if bad or fetch_errors else 0
 
 
 def main():
@@ -1543,14 +1734,18 @@ def main():
     p = argparse.ArgumentParser(prog='xq', description=__doc__)
     p.add_argument('--version', action='version', version='%(prog)s ' + VERSION)
     sub = p.add_subparsers(dest='cmd', required=True)
-    s = sub.add_parser('doctor'); s.add_argument('--need', default='codex,agy,cloud'); s.set_defaults(fn=doctor)
+    s = sub.add_parser('doctor')
+    s.add_argument('--need', default='codex,agy,cloud')
+    s.add_argument('--offline', action='store_true', help='run local checks without executor authentication probes')
+    s.set_defaults(fn=doctor)
     s = sub.add_parser('preflight'); s.add_argument('--executor', choices=('codex', 'agy'), required=True); s.set_defaults(fn=cmd_preflight)
     s = sub.add_parser('init'); s.add_argument('--local', action='store_true'); s.set_defaults(fn=cmd_init)
     s = sub.add_parser('assign'); s.add_argument('--id', required=True); s.add_argument('--executor', choices=EXECUTORS, required=True)
     s.add_argument('--brief', required=True); s.add_argument('--note'); s.add_argument('--job'); s.add_argument('--worktree')
     s.add_argument('--queued', action='store_true'); s.add_argument('--force', action='store_true'); s.set_defaults(fn=cmd_assign)
     s = sub.add_parser('finish'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
-    s.add_argument('--status', required=True, choices=('done', 'failed', 'blocked')); s.add_argument('--summary'); s.set_defaults(fn=cmd_finish)
+    s.add_argument('--status', required=True, choices=('done', 'failed', 'blocked')); s.add_argument('--summary')
+    s.add_argument('--head', help='reviewed Codex commit for forced reconciliation'); s.set_defaults(fn=cmd_finish)
     s = sub.add_parser('verify'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
     s.add_argument('--by', required=True); s.add_argument('--verdict', required=True, choices=('pass', 'fixes', 'reject'))
     s.add_argument('--head'); s.add_argument('--evidence', required=True); s.set_defaults(fn=cmd_verify)

@@ -57,25 +57,47 @@ For an offline project install, run from the target project and use the same
 destination for install, `--check`, and `--uninstall`:
 
 ```sh
-CLAUDE_SKILLS_DIR="$(git rev-parse --show-toplevel)/.claude/skills" \
-  "/path/to/claude-executor-queue/install.sh"
+if project=$(git rev-parse --show-toplevel); then
+  CLAUDE_SKILLS_DIR="$project/.claude/skills" "/path/to/claude-executor-queue/install.sh"
+fi
 ```
 
 ```powershell
-$env:CLAUDE_SKILLS_DIR = Join-Path (git rev-parse --show-toplevel) '.claude/skills'
-& 'C:\path\to\claude-executor-queue\install.ps1'
+$project = git rev-parse --show-toplevel
+if ($LASTEXITCODE -eq 0 -and $project) {
+    $env:CLAUDE_SKILLS_DIR = Join-Path $project '.claude/skills'
+    & 'C:\path\to\claude-executor-queue\install.ps1'
+}
 ```
 
 `--check` prints repo/installed versions and compares SHA-256 hashes. Exit 0 means identical.
-Exit 1 indicates a missing or different copy or an interrupted transaction. The check leaves files untouched.
-An interrupted operation is recovered by the next install or uninstall. If recovery needs manual intervention,
-the installer prints the path to the saved data.
+On exit 1, read the diagnostic for a missing or different copy, a busy destination,
+or an interrupted transaction. The check leaves files untouched.
+If the installer process is interrupted, the next install or uninstall at that destination attempts recovery
+and prints the path to saved data if it needs manual intervention. After a power loss or OS crash, recovery
+depends on the transaction files the filesystem preserved. Finish any installer commands from older
+checkouts before running a 3.4 or later installer against the same destination.
 Rerun the installer to update a clean copy. Local edits, extra files and unmanaged
 older copies are protected: back them up, then use `--force` to replace them or
 `--uninstall --force` to remove them. An identical unmanaged copy is safe to adopt.
 `--check` and `--uninstall` are mutually exclusive; `--force` never hides check drift.
 The hash receipt is stored beside the skill as `.executor-queue-install.json`;
 keep it for later clean-upgrade/edit detection. Installers need the whole repo.
+
+**Moving a 3.3 offline installation to a custom profile.** With `CLAUDE_CONFIG_DIR`
+set and no `CLAUDE_SKILLS_DIR` override, 3.3 still installed into `~/.claude/skills`.
+Check that old destination explicitly before switching:
+
+```sh
+CLAUDE_SKILLS_DIR="$HOME/.claude/skills" ./install.sh --check
+```
+
+For PowerShell, set `$env:CLAUDE_SKILLS_DIR = Join-Path $HOME '.claude/skills'` before
+running `.\install.ps1 --check`. The check can report a hash mismatch for a clean
+older version. Back up any edits and use the same override with
+`--uninstall` to remove the old copy. Clear the temporary override before installing
+under `$CLAUDE_CONFIG_DIR/skills`, and update any hook that points to the old helper.
+To keep managing the old copy instead, continue using the explicit override.
 
 The skill package includes `SKILL.md`, `scripts/xq.py` and `LICENSE`. Essential commands and safety
 rules stay inline in the compact skill, so it works without this repo. The longer
@@ -90,38 +112,46 @@ Start in a Git project with an initial commit and a chosen base branch. Invoke
 
 ```sh
 # Run in the checkout where you installed the project skill.
-project=$(git rev-parse --show-toplevel)
-xq="$project/.claude/skills/executor-queue/scripts/xq.py"
-python3 "$xq" --version
-python3 "$xq" init
-python3 "$xq" status --open
+if project=$(git rev-parse --show-toplevel); then
+  xq="$project/.claude/skills/executor-queue/scripts/xq.py"
+  python3 "$xq" --version
+  python3 "$xq" init
+  python3 "$xq" status --open
+fi
 ```
 
 For a global install, point `xq` at the script under your active Claude Code
 profile, usually `$HOME/.claude/skills/executor-queue/scripts/xq.py`. If you set
-`CLAUDE_CONFIG_DIR`, use that directory in place of `$HOME/.claude`. From a linked
-worktree, use the absolute helper path in the checkout or profile where you
-installed the skill. The helper resolves the shared project ledger.
+`CLAUDE_CONFIG_DIR`, use that directory in place of `$HOME/.claude`. To use the
+skill in Claude Code sessions started from linked worktrees, install globally or
+install it in each worktree where you need it. For direct CLI calls, use the
+absolute helper path from your installation. The helper resolves the shared ledger.
 
 In Windows PowerShell, find the project-installed helper and call it with the
 Python 3.8+ command available on your machine:
 
 ```powershell
-$xq = Join-Path (git rev-parse --show-toplevel) '.claude/skills/executor-queue/scripts/xq.py'
-py -3 $xq --version
-py -3 $xq init
-py -3 $xq status --open
+$project = git rev-parse --show-toplevel
+if ($LASTEXITCODE -eq 0 -and $project) {
+    $xq = Join-Path $project '.claude/skills/executor-queue/scripts/xq.py'
+    py -3 $xq --version
+    py -3 $xq init
+    py -3 $xq status --open
+}
 ```
 
 Replace `py -3` with `python` or `python3` if needed. A fresh ledger reports no tasks.
 When ready, run `doctor --need codex`, `agy` or `cloud` for the selected executor.
 A queued record does not start work. Follow the skill's worktree/launch recipe,
-then record the returned jobId and absolute worktree with `assign`. Poll/finish
-using actual results, review all code before running checks, and record independent
-verification with `verify`. Integrate only with the user's commit/merge authorization.
+then record the returned jobId and absolute worktree with `assign`. The helper runs
+on demand. Use `poll` to import job results. The optional Stop hook checks the ledger
+at the end of a Claude Code turn. Review all delivered code before running checks
+and record independent verification with `verify`. Integrate only with the user's
+commit/merge authorization.
 For a project that will use cloud sessions, start with `init`; keep briefs and status
-files tracked. Never ignore all of `.agents/`. Linked worktrees share the main
-checkout's ledger; `XQ_ROOT` explicitly overrides the root.
+files tracked. Before generating a cloud envelope, update every helper that shares
+the ledger to 3.4 or later. Keep the main checkout's ledger local. Use `XQ_ROOT`
+to override the root explicitly.
 
 The repo's [examples/ folder](examples/) contains task briefs, an agy job, exact
 cloud task sections, keep_busy config and optional Stop hooks for macOS, Linux,
@@ -140,8 +170,9 @@ and restore it with `--resume`.
 | Cloud | Connected repository, origin/default branch, reviewed pushed brief, dependency setup and correct runtimes, restricted network and no environment secrets; start with one small task. |
 
 `doctor --need` checks the comma-separated executors you select; unused ones are
-SKIP. Installation/authentication are user actions. Setup details and CLI commands
-are in the optional docs above. The repo/installer/tests are free and local;
+SKIP. Add `--offline` for local prerequisite checks only. Installation and sign-in
+are user actions. Setup details and CLI commands are in the optional docs above.
+The repo/installer/tests are free and local;
 external executor services may require accounts or incur charges. A brief does
 not authorize paid calls, network access or file sending beyond its explicit scope.
 
@@ -178,7 +209,7 @@ bare Git remotes, and need no network or model accounts. CI runs the full Python
 suite on Ubuntu and macOS, Windows-compatible tests on Windows, and a separate
 Skills CLI smoke test of project and global installation.
 
-See [CHANGELOG.md](CHANGELOG.md) and [v3.4 notes](docs/v3.4-notes.md) for release details.
+See [CHANGELOG.md](CHANGELOG.md) and [v3.5 notes](docs/v3.5-notes.md) for release details.
 
 Released under the [MIT license](LICENSE). To report a security issue, use the
 [security policy](SECURITY.md).

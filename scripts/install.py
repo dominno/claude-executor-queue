@@ -2,6 +2,7 @@
 """Shared offline installer for the POSIX and PowerShell entry points."""
 import argparse
 from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
@@ -11,10 +12,12 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'skills/executor-queue'
 PAYLOAD = ('LICENSE', 'SKILL.md', 'scripts/xq.py')
+LOCK_WAIT_SECONDS = 10
 
 
 def present(path):
@@ -30,18 +33,35 @@ def install_lock(path, *, writer):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError('install lock must be a regular file: ' + str(path))
-        if os.name == 'nt':
+        windows = os.name == 'nt'
+        if windows:
             import msvcrt
-            mode = msvcrt.LK_LOCK if writer else msvcrt.LK_RLCK
-            msvcrt.locking(fd, mode, 1)
-            try:
-                yield
-            finally:
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         else:
             import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX if writer else fcntl.LOCK_SH)
+            mode = fcntl.LOCK_EX if writer else fcntl.LOCK_SH
+
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                if windows:
+                    # The Windows CRT uses exclusive byte locks for readers too.
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(fd, mode | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise OSError('another installer command is active for {}; retry after it finishes'.format(
+                        path.parent)) from exc
+                time.sleep(min(0.05, remaining))
+        try:
             yield
+        finally:
+            if windows:
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     finally:
         os.close(fd)
 

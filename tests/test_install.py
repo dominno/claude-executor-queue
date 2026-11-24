@@ -506,6 +506,26 @@ def test_installer_transaction_serializes_versions_and_check(install, tmp_path):
     assert receipt['hashes']['SKILL.md'] == hashlib.sha256(next_source.read_bytes()).hexdigest()
 
 
+def test_installer_transaction_lock_reports_active_installer(install, tmp_path, monkeypatch):
+    active, release = tmp_path / 'active', tmp_path / 'release'
+    module = load_installer(install)
+    monkeypatch.setattr(module, 'LOCK_WAIT_SECONDS', 0.1)
+    monkeypatch.setenv('CLAUDE_SKILLS_DIR', str(install.skills))
+    with launch_installer(install, interrupt_at='executor-queue', ready=active, release=release) as first:
+        try:
+            wait_for_file(active)
+            for args in (('--check',), ()):
+                monkeypatch.setattr(sys, 'argv', ['install', *args])
+                with pytest.raises(OSError, match='another installer command is active.*retry after it finishes'):
+                    module.main()
+                assert first.poll() is None
+        finally:
+            release.touch()
+        out, err = first.communicate(timeout=20)
+        assert first.returncode == 0, out + err
+    ok(install.run('--check'))
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='requires native PowerShell and Windows launcher')
 def test_council_16_windows_native_install(tmp_path):
     target = tmp_path / 'skills with spaces'

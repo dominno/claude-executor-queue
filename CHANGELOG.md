@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.5 — 3.5.0 — 2026-11-24
+
+- Bind Codex verification to a committed delivery and retain the dispatch scope during worktree polling.
+- Keep cloud reports scoped to their session and require approval for push-hook and Git LFS transfers.
+- Add local-only diagnostics with `doctor --offline` and clarify offline installer migration and lock handling.
+
 ## v3.4 — 3.4.0 — 2026-11-24
 
 - Bind cloud result pushes to the approved endpoint and session branch.

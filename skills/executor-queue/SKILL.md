@@ -8,14 +8,14 @@ disable-model-invocation: true
 
 # Executor queue
 
-version: 3.4.0
+version: 3.5.0
 ## Decide and prepare
 
 Use the project's ledger/queue if AGENTS.md or CLAUDE.md defines one. Use xq only when none exists.
 Get explicit authorization for the task, executor, files and any network destination before delegation. Codex works in a worktree, agy reviews named nonconfidential files, and cloud works from pushed briefs.
 Run `python3 "${CLAUDE_SKILL_DIR}/scripts/xq.py"` wherever `xq.py` appears below. On Windows use `py -3` or your Python 3.8+ command.
 xq records work and queries existing jobs. Cloud commands fetch from origin.
-Run `xq.py init` first, then `xq.py doctor --need codex` (or `agy`, `cloud`, comma-separated as needed); follow its diagnostics.
+Run `xq.py init`, then `xq.py doctor --offline --need codex` (or `agy`, `cloud`, comma-separated). Run live probes only with authorized network access.
 Use the quoted CC/AGYB paths it resolves. agy-bridge requires macOS or Linux. Installation and sign-in are user actions.
 agy requires working `queue --help` AND `verdict --help`; numeric versions alone do not establish support.
 State is shared across worktrees via the main checkout's `.agents/ledger.jsonl`;
@@ -78,7 +78,7 @@ Show the commit list and obtain user consent to push the brief. Confirm the sepa
 `xq.py cloud-envelope --brief .agents/briefs/<batch>.md --tasks t1 t2` validates pushed bytes/headings and pins the base.
 When origin/HEAD is unset, merge/cloud commands require `--main <branch>` or config `{"main":"<branch>"}`; doctor labels its local fallback.
 Use `cloud-envelope` rather than `assign --executor cloud`. Use `--main <briefs-branch>` for protected main; optional `--branch claude/<session>`; `--reprint` does not reassign.
-Give the user the `/goal` envelope and ask them to authorize its exact origin push URL and session branch in the same message.
+Give the user the `/goal` envelope and ask them to authorize its exact push URL, session branch and any hook or LFS transfer in the same message.
 `xq.py cloud-collect --branch claude/<session>` fetches/validates reports; `--discover` discovers and collects session branches.
 Reports: max 65536 bytes, summary/test fields 2000 characters, 100 tests; unknown fields dropped, full report hash retained.
 Discovery skips foreign IDs and validates the whole batch before writing. MISSING/CHANGED/PROBLEM needs reconciliation. Local `finish --status failed` cannot stop a remote session;

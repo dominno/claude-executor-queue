@@ -248,7 +248,9 @@ def test_cloud_envelope_pins_base_and_records_each_task(queue, capsys):
                  'git remote get-url --push --all origin', 'origin is configured as a mirror',
                  'git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch"',
                  'Before pushing, inspect all outgoing commits',
-                 'Limit network access to authorized Git operations on that origin.'):
+                 'Inspect the effective pre-push hook', 'Git LFS upload endpoints',
+                 'any endpoint or payload lacks explicit approval', 'Keep the hooks in place.',
+                 'Limit network access to authorized Git operations on that origin and separately approved hook transfers'):
         assert rule in output.out
     assert 'git push origin HEAD' not in output.out
     assert 'recorded 2 assign events' in output.err

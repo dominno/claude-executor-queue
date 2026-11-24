@@ -2,7 +2,8 @@
 
 Run `xq.py init`, then `xq.py doctor --need agy`. The bridge requires Python 3.9+ on macOS or Linux.
 `doctor --need agy` runs the installed bridge's diagnostics, including its network check for model access.
-For a local check after installation, run `"$AGYB" doctor --repo "$root" --offline`.
+Use `xq.py doctor --need agy --offline` for local checks. A successful offline check confirms local setup
+while sign-in and model access remain unverified.
 See the [plugin setup instructions](codex.md#setup).
 `xq.py` means the installed helper; `$root` is the absolute primary checkout,
 `$wt` its review worktree and `$base` the explicitly selected base branch.
