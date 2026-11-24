@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.6 — 3.6.0 — 2026-11-24
+
+- Add read-only status filters and a versioned JSON result with recorded executor observations and slot occupancy.
+- Add scoped Codex and agy polling and keep cloud report collection explicit.
+- Separate task replay, ledger transactions and executor observations inside the existing helper.
+- Isolate CLI test environments and illustrate the difference between reading and refreshing status.
+
 ## v3.5 — 3.5.0 — 2026-11-24
 
 - Bind Codex verification to a committed delivery and retain the dispatch scope during worktree polling.

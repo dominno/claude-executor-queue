@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 460" width="880" height="460" role="img" aria-labelledby="title desc" xml:lang="en">
   <title id="title">What each executor receives and returns</title>
-  <desc id="desc">Codex takes a task brief and produces a job result with code changes in a Git worktree. xq records the result with poll. agy-bridge sends approved files to Google Antigravity for review and xq imports the report with agy-sync. Claude Code on the web works from a pushed brief and returns a Git branch with status files, which xq reads with cloud-collect.</desc>
+  <desc id="desc">Refresh executor evidence explicitly. Codex takes a task brief and produces a job result with code changes in a Git worktree, which xq can record with poll. agy-bridge sends approved files to Google Antigravity for review, and xq can import the local artifacts with agy-sync. Claude Code on the web works from a pushed brief and publishes a report on a Git branch. xq fetches and imports that evidence with cloud-collect.</desc>
   <style>
     text { font-family: 'Segoe UI', Arial, sans-serif; fill: #142438; }
     .heading { font-size: 32px; font-weight: 700; }
@@ -14,12 +14,12 @@
 
   <rect x="1" y="1" width="878" height="458" rx="24" fill="#F3F6FB" stroke="#D6DFED"/>
   <text x="30" y="55" class="heading">What each executor receives and returns</text>
-  <text x="30" y="86" class="intro">Choose a route based on the work you need.</text>
+  <text x="30" y="86" class="intro">Explicit refresh commands update the ledger with executor evidence.</text>
 
   <text x="54" y="124" class="column">Input</text>
   <text x="240" y="124" class="column">Executor</text>
   <text x="471" y="124" class="column">Result</text>
-  <text x="667" y="124" class="column">Record with xq</text>
+  <text x="667" y="124" class="column">Refresh with xq</text>
 
   <g transform="translate(0 139)">
     <rect x="30" width="820" height="86" rx="14" fill="#FFFFFF" stroke="#D6DFED"/>
@@ -41,7 +41,8 @@
     <path class="arrow" d="M198 43h19m-6-5 6 5-6 5 M429 43h19m-6-5 6 5-6 5 M626 43h19m-6-5 6 5-6 5"/>
     <text x="240" y="38" class="label">agy-bridge</text>
     <text x="240" y="62" class="detail">Google Antigravity</text>
-    <text x="471" y="49" class="label">Review report</text>
+    <text x="471" y="38" class="label">Review artifacts</text>
+    <text x="471" y="62" class="detail">Local bridge output</text>
     <rect x="667" y="24" width="111" height="38" rx="9" fill="#E3F5F0"/>
     <text x="681" y="49" class="command" style="fill:#096B5E">agy-sync</text>
   </g>
@@ -53,7 +54,8 @@
     <path class="arrow" d="M198 43h19m-6-5 6 5-6 5 M429 43h19m-6-5 6 5-6 5 M626 43h19m-6-5 6 5-6 5"/>
     <text x="240" y="38" class="label">Claude Code</text>
     <text x="240" y="62" class="detail">Web session</text>
-    <text x="471" y="49" class="label">Branch + status</text>
+    <text x="471" y="38" class="label">Published report</text>
+    <text x="471" y="62" class="detail">Git session branch</text>
     <rect x="667" y="24" width="155" height="38" rx="9" fill="#EFE7FC"/>
     <text x="681" y="49" class="command" style="fill:#613E9B">cloud-collect</text>
   </g>

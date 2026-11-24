@@ -33,6 +33,7 @@ restricted network policy, and **no secrets in environment settings**. Try one s
    With `session_branch` set to the checked branch, push the single approved ref:
    `git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch"`.
 4. `xq.py cloud-collect --branch claude/<session> [--batch <batch>]`, or `--discover` to inspect origin's `claude/*` refs.
+   `xq.py status --executor cloud --json` reads the recorded result and any last report observation. [Status fields](job-status.md#json-output)
    Fetches only. Validate all reports in each batch before importing that batch: schema, branch, pinned fork point, task commit and distinct head.
    Network Git disables terminal prompts and times out after five minutes per operation.
    If a discovered branch cannot be fetched, discovery reports the failure and exits nonzero after collecting valid results from independent branches.

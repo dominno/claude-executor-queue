@@ -27,7 +27,7 @@ if ($LASTEXITCODE -eq 0 -and $project) {
 }
 ```
 
-The version check reads the installed helper. `init` sets up the `.agents/` directory and local Git exclusions. `status --open` prints `no tasks` for a fresh ledger.
+The version check reads the installed helper. `init` sets up the `.agents/` directory and local Git exclusions. `status --open` prints `no tasks` for a fresh ledger. [Status filters and refresh commands](job-status.md)
 
 For a user-level install, use the script under your active Claude Code profile. The default path is `$HOME/.claude/skills/executor-queue/scripts/xq.py`. When `CLAUDE_CONFIG_DIR` selects another profile, use that directory in place of `$HOME/.claude`.
 

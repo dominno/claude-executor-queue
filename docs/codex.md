@@ -68,8 +68,9 @@ No executor receives permission for paid calls, network, push or merge merely by
    Effort: low/minimal for mechanical work, medium for routine work, high/xhigh for hard debugging (check CLI support).
    Leave `--model` unset by default; spark may be unavailable.
 4. Lifecycle: `node "$CC" status <jobId> --cwd "$wt" --json`, then `node "$CC" result <jobId> --cwd "$wt"`.
-   `xq.py poll` imports terminal status/result and runs agy-sync; it never runs a task. Bare status filters by session;
-   `/codex:status|result|cancel` from the main checkout does not find worktree jobs.
+   `xq.py poll --id <id>` refreshes a single recorded task. Bare `xq.py poll` checks Codex and imports agy artifacts.
+   The companion's own `status` without a job ID filters by session. The shortcuts `/codex:status`, `/codex:result`
+   and `/codex:cancel` from the main checkout do not find worktree jobs. [Status and refresh commands](job-status.md)
    To stop a runaway: `node "$CC" cancel <jobId> --cwd "$wt"`, confirm cancellation, then
    `xq.py finish --id <id> --status failed --summary '<actual result or failure>'`.
    Otherwise finish with done/failed/blocked and the actual result summary; poll can do this for recorded jobs.

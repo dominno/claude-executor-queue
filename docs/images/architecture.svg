@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566"
      role="img" aria-labelledby="architecture-title architecture-description" xml:lang="en">
   <title id="architecture-title">How executor-queue fits together</title>
-  <desc id="architecture-description">You authorize work with /executor-queue in Claude Code. The skill coordinates Codex, agy-bridge, and Claude Code on the web. It uses xq.py to read and record evidence in a local ledger shared by Git worktrees. Git tracks selected briefs and status files separately.</desc>
+  <desc id="architecture-description">You authorize work with /executor-queue in Claude Code. The skill coordinates Codex, agy-bridge, and Claude Code on the web. xq.py reads recorded task status from a local ledger shared by Git worktrees. Explicit refresh commands update the ledger from executor evidence. Git tracks selected briefs and status files separately.</desc>
   <defs>
     <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"
             markerUnits="userSpaceOnUse">
@@ -47,7 +47,8 @@
       <text x="234" y="232">Coordinates delegated work and verification.</text>
       <text x="60" y="360">Codex and agy-bridge · installed separately</text>
       <text x="60" y="382">Claude Code on the web · connected repository</text>
-      <text x="478" y="365">Reads and records workflow evidence.</text>
+      <text x="478" y="360">status reads the local ledger.</text>
+      <text x="478" y="382">Authorized refreshes update the ledger.</text>
       <text x="478" y="485">Local ledger shared by Git worktrees.</text>
       <text x="38" y="540">Track briefs and status reports in Git for web sessions.</text>
     </g>

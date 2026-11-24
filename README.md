@@ -28,13 +28,13 @@ The repository includes installers for macOS and Linux (`install.sh`) and Window
 
 ## How it works
 
-![You invoke the executor-queue skill in Claude Code. It coordinates the selected executor and uses xq to read and write a local ledger shared by Git worktrees.](docs/images/architecture.svg)
+![You invoke the executor-queue skill in Claude Code. The executor handles the work. xq reads recorded status and imports authorized results into a local ledger shared by Git worktrees.](docs/images/architecture.svg)
 
 The skill coordinates the work you request. The executor produces the result. `xq` records the evidence on demand in `.agents/ledger.jsonl`, an append-only log in the main checkout. A separate Git worktree shares that log. [Using the helper from a worktree](docs/installation.md#run-xq-directly)
 
 ## Choose an executor
 
-![Codex works in a Git worktree from a task brief. agy-bridge reviews approved files. Claude Code on the web works from a pushed brief. The poll, agy-sync and cloud-collect commands update the xq ledger.](docs/images/executor-paths.svg)
+![Codex works in a Git worktree from a task brief. agy-bridge reviews approved files. Claude Code on the web works from a pushed brief. Refresh the xq ledger explicitly with poll, agy-sync or cloud-collect.](docs/images/executor-paths.svg)
 
 | If you need | Executor | Before you start |
 | --- | --- | --- |
@@ -49,6 +49,10 @@ Ask the skill to check local prerequisites for the executor you choose. If you r
 ![Authorize the scope and write a brief, start the executor and record the assignment, collect the actual result, then verify independently. Integration is optional and requires approval.](docs/images/task-lifecycle.svg)
 
 A **brief** describes the goal, allowed files and checks. A **queued** task is waiting for dispatch. After the executor returns, inspect the full delivery before applying changes or running tests, then record the verdict with `verify`. For Codex, verify the reviewed commit before integrating it. [Example briefs, jobs and optional Stop hooks](examples/)
+
+## Check progress
+
+Ask `/executor-queue` to show open tasks, or run `python3 "$xq" status --open`. Filter by task ID, executor or recorded state and add `--json` for scripting. To update the ledger, request an explicit refresh with `poll` for Codex or agy, or use `cloud-collect` for reports published by Claude Code on the web. [Helper path](docs/installation.md#run-xq-directly) · [Status filters, JSON and refresh commands](docs/job-status.md)
 
 ## What gets shared
 
@@ -66,4 +70,4 @@ python3 -m pytest -q tests
 git diff --check
 ```
 
-See the [changelog](CHANGELOG.md) and [3.5 release notes](docs/v3.5-notes.md) for version changes. The project is released under the [MIT license](LICENSE). Use the [security policy](SECURITY.md) to report a vulnerability.
+See the [changelog](CHANGELOG.md) and [3.6 release notes](docs/v3.6-notes.md) for version changes. The project is released under the [MIT license](LICENSE). Use the [security policy](SECURITY.md) to report a vulnerability.

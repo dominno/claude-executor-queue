@@ -29,19 +29,7 @@ def xq():
 
 
 @pytest.fixture
-def queue(xq, tmp_path, monkeypatch):
-    # Ignore inherited Git worktree/index/config settings and all global hooks.
-    for key in tuple(os.environ):
-        if key.startswith('GIT_'):
-            monkeypatch.delenv(key)
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('XDG_CONFIG_HOME', str(home))
-    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
-    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
-    monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'file')
-    monkeypatch.setenv('GIT_TERMINAL_PROMPT', '0')
+def queue(xq, tmp_path, monkeypatch, isolated_queue_environment):
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.chdir(repo)
@@ -134,6 +122,30 @@ def verify(q, task='local', verdict='pass'):
 
 def collect(q, *args):
     return q.cli('cloud-collect', '--branch', 'claude/test', *args)
+
+
+def test_fixture_environment_ignores_inherited_overrides(request, tmp_path, monkeypatch):
+    inherited = tmp_path / 'inherited'
+    inherited.mkdir()
+    for key in ('GIT_DIR', 'GIT_CONFIG_GLOBAL', 'XQ_ROOT', 'CLAUDE_CONFIG_DIR',
+                'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME'):
+        monkeypatch.setenv(key, str(inherited / key))
+    monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'https')
+
+    q = request.getfixturevalue('queue')
+    home = tmp_path / 'home'
+    assert Path.home().resolve() == home.resolve()
+    assert Path(os.environ['HOME']) == home
+    assert Path(os.environ['USERPROFILE']) == home
+    assert Path(os.environ['XDG_CONFIG_HOME']) == home / '.config'
+    assert 'GIT_DIR' not in os.environ
+    assert 'XQ_ROOT' not in os.environ
+    assert 'CLAUDE_CONFIG_DIR' not in os.environ
+    assert os.environ['GIT_CONFIG_GLOBAL'] == os.devnull
+    assert os.environ['GIT_ALLOW_PROTOCOL'] == 'file'
+    assert q.cli('init', '--local') == 0
+    assert (q.repo / '.agents/ledger.jsonl').is_file()
+    assert not list(inherited.iterdir())
 
 
 def test_init_and_empty_status(queue, capsys):

@@ -7,7 +7,9 @@ doctor query installed tools; cloud commands fetch refs from the configured orig
 """
 import argparse
 from contextlib import contextmanager
+from copy import deepcopy
 import datetime
+from functools import wraps
 import hashlib
 import json
 import math
@@ -20,9 +22,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from threading import get_ident
 import time
 
-VERSION = '3.5.0'
+VERSION = '3.6.0'
 REPORT_MAX_BYTES = 65536
 REPORT_MAX_TEXT = 2000
 REPORT_MAX_TESTS = 100
@@ -31,10 +34,14 @@ LOCK_WAIT_SECONDS = 120
 GIT_NETWORK_TIMEOUT = 300
 
 EXECUTORS = ('codex', 'agy', 'cloud')
+LOCAL_EXECUTOR_LIMITS = {'codex': 2, 'agy': 1}
+INTEGRATING_EXECUTORS = ('codex', 'cloud')
+TASK_STATES = ('queued', 'running', 'done', 'failed', 'blocked')
+OBSERVATION_STATES = TASK_STATES + ('cancelled', 'unknown', 'unavailable')
 STATUS_DIR = '.agents/cloud-status'
 ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$')
 SHA_RE = re.compile(r'^[0-9a-f]{7,64}$')
-_LOCKED = set()
+_LOCKED = {}
 
 
 def fail(message):
@@ -142,7 +149,7 @@ def ledger_stamp(root):
 def snapshot(root):
     with ledger_lock(root):
         tasks = state(root)
-        return tasks, (ledger_stamp(root), tasks)
+        return tasks, (ledger_stamp(root), deepcopy(tasks))
 
 
 def append_checked(root, rows, stamp, *, dependencies=None):
@@ -157,8 +164,9 @@ def append_checked(root, rows, stamp, *, dependencies=None):
             touched = {row['id'].casefold() for row in rows}
 
             def affected(tasks):
-                # Heartbeats update liveness without changing the queried attempt.
-                return {tid: {key: value for key, value in task.items() if key not in ('seen', 'ack_until')}
+                # Heartbeats and observations do not change the queried attempt.
+                return {tid: {key: value for key, value in task.items()
+                              if key not in ('seen', 'ack_until', 'observation')}
                         for tid, task in tasks.items() if tid.casefold() in touched}
 
             if (affected(previous) != affected(current) or
@@ -171,7 +179,8 @@ def append_checked(root, rows, stamp, *, dependencies=None):
 def ledger_lock(root):
     """Lock the entire read/check/append transaction, not just a single write."""
     key = str(root.resolve())
-    if key in _LOCKED:
+    owner = (os.getpid(), get_ident())
+    if _LOCKED.get(key) == owner:
         yield
         return
     path = root / '.agents/ledger.lock'
@@ -197,16 +206,27 @@ def ledger_lock(root):
         else:
             import fcntl
             fcntl.flock(fh, fcntl.LOCK_EX)
-        _LOCKED.add(key)
+        _LOCKED[key] = owner
         try:
             yield
         finally:
-            _LOCKED.remove(key)
+            del _LOCKED[key]
             if WINDOWS:
                 fh.seek(0)
                 msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def ledger_mutation(command):
+    """Resolve the repository once and keep command checks and writes together."""
+    @wraps(command)
+    def mutate(a):
+        root = repo_root()
+        with ledger_lock(root):
+            return command(a, root)
+
+    return mutate
 
 
 def append_many(root, rows):
@@ -262,10 +282,22 @@ def events(root):
     return rows
 
 
-def state(root, *, rows=None):
+def executor_observation(source, status):
+    return {'source': source, 'state': status, 'observed_at': now()}
+
+
+def apply_observation(task, observation):
+    fields = ('source', 'state', 'observed_at')
+    if not isinstance(observation, dict) or not all(isinstance(observation.get(key), str) and observation[key]
+                                                       for key in fields):
+        return
+    previous = task.get('observation', {})
+    if observation['observed_at'] >= previous.get('observed_at', ''):
+        task['observation'] = {key: observation[key] for key in fields}
+
+
+def replay_events(rows):
     tasks = {}
-    if rows is None:
-        rows = events(root)
     for e in rows:
         tid = e['id']
         kind = e.get('event')
@@ -274,14 +306,19 @@ def state(root, *, rows=None):
             # New attempt carries no previous verdict, finish, job, base or merge.
             tasks[tid] = dict(e, attempt=attempt, assigned=e.get('ts', ''),
                               status='queued' if e.get('queued') else 'running')
+            tasks[tid].pop('observation', None)
             if e.get('executor') == 'cloud':
                 tasks[tid].setdefault('batch_branch', e.get('branch'))
+        elif kind == 'observe':
+            if tid in tasks:
+                apply_observation(tasks[tid], e.get('observation'))
         elif kind in ('finish', 'verify', 'merge', 'seen', 'close'):
             t = tasks.setdefault(tid, {'id': tid})
             if kind == 'verify' and t.get('status') in ('running', 'queued'):
                 continue  # Forced early audit events never approve a delivery.
             if kind == 'finish':
-                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'delivery_base', 'tests'):
+                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256',
+                            'delegate_exit', 'result', 'head', 'delivery_base', 'tests', 'observation'):
                     t.pop(key, None)
                 if not e.get('preserve_closed'):
                     # Historical forced finishes reopened the task.
@@ -291,16 +328,23 @@ def state(root, *, rows=None):
                     e.get('verdict') != 'pass' or e.get('verified_head') != t.get('verified_head')):
                 t.pop('merged', None)
                 t.pop('commit', None)
-            t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id', 'preserve_closed')})
+            t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id', 'preserve_closed', 'observation')})
             if kind == 'finish':
                 t['finished'] = e.get('ts', '')
+                apply_observation(t, e.get('observation'))
             elif kind == 'seen':
                 t['seen'] = e.get('ts', '')
+                if 'ack_until' not in e:
+                    apply_observation(t, e.get('observation'))
             elif kind == 'close':
                 t['closed'] = e.get('ts', '')
             elif kind == 'merge':
                 t['merged'] = e.get('commit')
     return tasks
+
+
+def state(root, *, rows=None):
+    return replay_events(events(root) if rows is None else rows)
 
 
 def valid_id(tid):
@@ -325,7 +369,7 @@ def config(root):
                 raise ValueError()
         limits = data.get('limits', {})
         if not isinstance(limits, dict) or any(
-                k not in ('codex', 'agy') or type(v) is not int or v < 0
+                k not in LOCAL_EXECUTOR_LIMITS or type(v) is not int or v < 0
                 for k, v in limits.items()):
             raise ValueError()
         for key, default in (('min_free_gb', 5), ('max_load_per_cpu', 1.0)):
@@ -430,8 +474,8 @@ def preflight_status(root, tasks, data):
         live = dict(codex=0, agy=0)
         reasons.append('live process readings unavailable: ' + str(exc))
     per_executor = {}
-    for executor, default in (('codex', 2), ('agy', 1)):
-        running = [t for t in tasks if t.get('executor') == executor and t.get('status') == 'running']
+    for executor, default in LOCAL_EXECUTOR_LIMITS.items():
+        running = [t for t in tasks if t.get('executor') == executor and occupies_slot(t)]
         closed = sum(bool(t.get('closed')) for t in running)
         count = max(len(running), live[executor])
         limit = data.get('limits', {}).get(executor, default)
@@ -476,8 +520,8 @@ def write_config(root, data):
             temp.unlink()
 
 
-def cmd_pause(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_pause(a, root):
     data = config(root)
     paused = set(data.get('paused', []))
     paused.discard(a.executor) if a.resume else paused.add(a.executor)
@@ -486,12 +530,12 @@ def cmd_pause(a):
     return 0
 
 
-def cmd_init(a):
+@ledger_mutation
+def cmd_init(a, root):
     """Track briefs/status by default; ignore only ledger/lock and agy output.
 
     --local excludes briefs/status via git info/exclude (disables cloud handoff).
     """
-    root = repo_root()
     for folder in ('.agents/briefs', STATUS_DIR, '.agents/review'):
         safe_path(root / folder)
         (root / folder).mkdir(parents=True, exist_ok=True)
@@ -503,10 +547,10 @@ def cmd_init(a):
     return 0
 
 
-def cmd_assign(a):
+@ledger_mutation
+def cmd_assign(a, root):
     if a.executor == 'cloud':
         fail('assign --executor cloud is unsupported; use cloud-envelope to pin a pushed brief and base')
-    root = repo_root()
     valid_id(a.id)
     rows = events(root)
     known = state(root, rows=rows)
@@ -575,8 +619,8 @@ def require_task(root, a, allowed, action):
     return t or {}
 
 
-def cmd_finish(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_finish(a, root):
     task = require_task(root, a, ('running', 'queued'), 'finish')
     event = dict(event='finish', id=a.id, status=a.status, summary=(a.summary or '')[:2000], force=a.force)
     successful_codex = task.get('executor') == 'codex' and a.status == 'done'
@@ -614,8 +658,8 @@ def codex_delivery(root, task):
     return {'delivery_base' if dirty else 'head': head}
 
 
-def cmd_verify(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_verify(a, root):
     t = require_task(root, a, ('done', 'failed', 'blocked'), 'verify finished')
     if t.get('merged') and not a.force:
         fail(a.id + ' is already merged; use --force only for explicit reconciliation')
@@ -651,8 +695,8 @@ def cmd_verify(a):
     return 0
 
 
-def cmd_merge(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_merge(a, root):
     t = require_task(root, a, ('done',), 'merge after pass')
     if not a.force and t.get('merged'):
         fail(a.id + ' is already merged; use --force to reconcile')
@@ -731,11 +775,60 @@ def acknowledgement_hours(value):
     return hours
 
 
+def is_open_task(task):
+    return not task.get('closed') and (
+        task.get('status') in ('running', 'queued') or task.get('verdict') != 'pass' or
+        (task.get('executor') in INTEGRATING_EXECUTORS and not task.get('merged')))
+
+
+def occupies_slot(task):
+    executor = task.get('executor')
+    return isinstance(executor, str) and executor in LOCAL_EXECUTOR_LIMITS and task.get('status') == 'running'
+
+
+def status_observation(task):
+    observation = task.get('observation')
+    if not isinstance(observation, dict):
+        return None
+    source, status = observation.get('source'), observation.get('state')
+    if source not in EXECUTORS or source != task.get('executor') or status not in OBSERVATION_STATES:
+        return None
+    try:
+        observed = parse_timestamp(observation.get('observed_at')).astimezone(datetime.timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return {'source': source, 'state': status, 'observed_at': observed.isoformat().replace('+00:00', 'Z')}
+
+
+def status_record(task, stale_hours):
+    # Allowlist metadata so summaries, paths, commands and evidence stay in the ledger.
+    tid, executor, status = task['id'], task.get('executor'), task.get('status')
+    verdict, attempt = task.get('verdict'), task.get('attempt')
+    return {
+        'id': tid if ID_RE.fullmatch(tid) else None,
+        'executor': executor if executor in EXECUTORS else None,
+        'attempt': attempt if type(attempt) is int and attempt > 0 else None,
+        'state': status if status in TASK_STATES else 'unknown',
+        'verdict': verdict if verdict in ('pass', 'fixes', 'reject') else None,
+        'merged': bool(task.get('merged')),
+        'closed': bool(task.get('closed')),
+        'stale': stale(task, stale_hours),
+        'occupies_slot': occupies_slot(task),
+        'observation': status_observation(task),
+    }
+
+
 def cmd_status(a):
-    rows = list(state(repo_root()).values())
-    if a.open:
-        rows = [t for t in rows if not t.get('closed') and (t.get('status') in ('running', 'queued') or
-                t.get('verdict') != 'pass' or (t.get('executor') in ('codex', 'cloud') and not t.get('merged')))]
+    if a.id is not None:
+        valid_id(a.id)
+    rows = [task for task in state(repo_root()).values()
+            if (not a.id or task['id'] == a.id)
+            and (not a.executor or task.get('executor') == a.executor)
+            and (not a.state or task.get('status') == a.state)
+            and (not a.open or is_open_task(task))]
+    if a.json:
+        print(json.dumps({'schema_version': 1, 'tasks': [status_record(t, a.stale_hours) for t in rows]}))
+        return 0
     for t in rows:
         print('{:<32} {:<6} {:<8} {:<7} {:<14} {}{}{}'.format(
             t['id'], t.get('executor') or '-', t.get('status') or '-', t.get('verdict') or '-',
@@ -753,7 +846,8 @@ def cmd_hook(a):
         payload = {}
     active = isinstance(payload, dict) and payload.get('stop_hook_active')
     root = repo_root()
-    tasks = [t for t in state(root).values() if not t.get('closed')]
+    all_tasks = list(state(root).values())
+    tasks = [t for t in all_tasks if not t.get('closed')]
     problems = []
     unverified = [t['id'] for t in tasks if t.get('status') in ('done', 'failed', 'blocked') and not t.get('verdict')]
     if unverified:
@@ -770,7 +864,7 @@ def cmd_hook(a):
         if not busy and (queued or ex in data.get('keep_busy', [])):
             if ex in ('codex', 'agy'):
                 if capacity is None:
-                    capacity, details = preflight_status(root, list(state(root).values()), data)
+                    capacity, details = preflight_status(root, all_tasks, data)
                     for detail in details:
                         if detail.startswith('NOTE '):
                             print(detail, file=sys.stderr)
@@ -786,8 +880,8 @@ def cmd_hook(a):
     return 2 if problems and not active else 0
 
 
-def cmd_ack(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_ack(a, root):
     require_task(root, a, ('running',), 'ack')
     try:
         until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=a.hours)
@@ -797,8 +891,8 @@ def cmd_ack(a):
     return 0
 
 
-def cmd_close(a):
-    root = repo_root()
+@ledger_mutation
+def cmd_close(a, root):
     t = require_task(root, a, ('queued', 'done', 'failed', 'blocked'), 'close')
     reason = a.reason
     if reason not in ('dropped', 'rejected'):
@@ -1051,15 +1145,29 @@ def read_agy_header(path, require_complete=True, archived=False):
     return text
 
 
-def cmd_agy_sync(a):
-    root = repo_root()
+def sync_agy(root, *, task_id=None, delegate_exit=None, out=None, observe_incomplete=False):
     rows = []
     problem = False
     known, stamp = snapshot(root)
-    explicit = getattr(a, 'delegate_exit', None)
-    out = getattr(a, 'out', None)
+    explicit = delegate_exit
     if bool(explicit) != bool(out):
         fail('--delegate-exit <id>=<code> requires an absolute --out path')
+    if task_id is not None:
+        valid_id(task_id)
+        if explicit:
+            fail('cannot select a task and reconcile a delegate exit in the same query')
+        if known.get(task_id, {}).get('executor') != 'agy':
+            fail('no registered agy task ' + task_id)
+        tasks = [(task_id, known[task_id])]
+    else:
+        tasks = known.items()
+
+    def observe(tid, status, detail=None):
+        if task_id is not None or observe_incomplete:
+            if detail:
+                print('{}: {}'.format(tid, detail))
+            rows.append(dict(event='observe', id=tid, observation=executor_observation('agy', status)))
+
     if explicit:
         match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9._-]{0,119})=([0-9]{1,10})', explicit)
         if not match:
@@ -1087,10 +1195,12 @@ def cmd_agy_sync(a):
                 fail('result has bridge metadata; use ordinary agy-sync to preserve bridge checks')
         except (OSError, ValueError) as exc:
             fail('cannot read bridge artifacts: ' + str(exc))
-        rows.append(dict(event='finish', id=tid, status='done' if code == 0 else 'failed',
+        status = 'done' if code == 0 else 'failed'
+        rows.append(dict(event='finish', id=tid, status=status,
                          summary='Unverified plain delegate exit {}: {}'.format(code, result),
-                         delegate_exit=code, result=str(result)))
-    for tid, t in known.items():
+                         delegate_exit=code, result=str(result),
+                         observation=executor_observation('agy', status)))
+    for tid, t in tasks:
         if explicit and tid == match.group(1):
             continue
         if t.get('executor') != 'agy' or t.get('status') not in ('running', 'queued'):
@@ -1105,11 +1215,13 @@ def cmd_agy_sync(a):
         job_file = tid + '.job'
         try:
             if agy_artifact_exists(queue / job_file):
+                observe(tid, 'unknown', 'pending bridge artifact exists')
                 continue
             failed = agy_artifact_exists(queue / 'failed' / job_file)
             done = agy_artifact_exists(queue / 'done' / job_file)
             if failed:
-                row = dict(event='finish', id=tid, status='failed', **closure)
+                row = dict(event='finish', id=tid, status='failed',
+                           observation=executor_observation('agy', 'failed'), **closure)
                 if agy_artifact_exists(result):
                     row.update(summary='agy failed archive; inspect result locally', result=str(result))
                 else:
@@ -1120,11 +1232,15 @@ def cmd_agy_sync(a):
         except (OSError, ValueError) as exc:
             print('PROBLEM {}: cannot read bridge artifacts: {}'.format(tid, exc))
             problem = True
+            observe(tid, 'unavailable')
             continue
         if header is None:
             if done:
                 print('PROBLEM {}: done archive has no result'.format(tid))
                 problem = True
+                observe(tid, 'unavailable')
+            else:
+                observe(tid, 'unknown', 'no bridge artifact found')
             continue
         # Only the bridge header supplies exit metadata.
         metadata = re.split(r'^### Attempt\b', header, maxsplit=1, flags=re.M)[0]
@@ -1136,85 +1252,159 @@ def cmd_agy_sync(a):
         if not codes:
             print('PROBLEM {}: missing bridge exit header; inspect result manually'.format(tid))
             problem = True
+            observe(tid, 'unavailable')
             continue
         rejected = omitted or unsafe_attempt or any(code.strip('0') for code in codes)
-        rows.append(dict(event='finish', id=tid, status='failed' if rejected else 'done',
-                         summary='Unverified agy result: ' + str(result), result=str(result), **closure))
+        status = 'failed' if rejected else 'done'
+        rows.append(dict(event='finish', id=tid, status=status,
+                         summary='Unverified agy result: ' + str(result), result=str(result),
+                         observation=executor_observation('agy', status), **closure))
     append_checked(root, rows, stamp)
     return 1 if problem else 0
 
 
-def cmd_poll(a):
-    root = repo_root()
+def cmd_agy_sync(a):
+    return sync_agy(repo_root(), delegate_exit=getattr(a, 'delegate_exit', None), out=getattr(a, 'out', None))
+
+
+def codex_poll_worktree(root_common, value):
+    try:
+        checkout = Path(value)
+        if not checkout.is_absolute():
+            return None
+        checkout = checkout.resolve(strict=True)
+        location = git('rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel',
+                       check=False, cwd=checkout).splitlines()
+        common, top = (Path(path).resolve() for path in location)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return str(checkout) if common == root_common and top == checkout else None
+
+
+CODEX_JOB_STATES = {
+    'running': 'running', 'queued': 'queued', 'completed': 'done', 'done': 'done',
+    'failed': 'failed', 'error': 'failed', 'cancelled': 'cancelled', 'canceled': 'cancelled',
+}
+
+
+def query_codex_status(candidates, job_id, checkout):
+    outcome = 'unavailable'
+    for companion in candidates:
+        args = ['node', companion]
+        result = run(args + ['status', job_id, '--cwd', checkout, '--json'])
+        if result.returncode:
+            continue
+        try:
+            job = json.loads(result.stdout)['job']
+            if job.get('id', job_id) == job_id:
+                return CODEX_JOB_STATES[job['status']], args
+        except (AttributeError, KeyError, RecursionError, TypeError, ValueError):
+            pass
+        outcome = 'unknown'
+    return outcome, None
+
+
+def poll_codex(root, tasks, stamp, *, explicit):
+    if not tasks:
+        return 0
+    root_common = Path(git('rev-parse', '--path-format=absolute', '--git-common-dir', cwd=root).strip()).resolve()
     caller_project = plugin_project_root()
-    companions = {}
+    companions, rows = {}, []
+    problem = False
 
     def companion(project):
         if project not in companions:
             companions[project] = plugin_binary('codex', project=project)
         return companions[project]
 
-    problem = False
-    rows = []
-    known, stamp = snapshot(root)
-    for tid, t in known.items():
-        if t.get('executor') != 'codex' or t.get('status') != 'running':
+    def observe(tid, status):
+        return dict(event='observe', id=tid, observation=executor_observation('codex', status))
+
+    def report_problem(event, message):
+        nonlocal problem
+        print('PROBLEM {}: {}'.format(event['id'], message))
+        problem = True
+        if explicit:
+            rows.append(event)
+
+    for task in tasks:
+        tid, closed = task['id'], task.get('closed')
+        job = task.get('job')
+        checkout = codex_poll_worktree(root_common, task.get('worktree')) if job else None
+        if not checkout:
+            if explicit or not closed:
+                report_problem(observe(tid, 'unavailable'),
+                               'missing job or invalid recorded worktree. Reconcile manually.')
             continue
-        closed = t.get('closed')
-        registered_project = t.get('codex_project')
+        registered_project = task.get('codex_project')
         projects = [Path(registered_project)] if registered_project else [root]
         if not registered_project and caller_project and caller_project != root:
             projects.insert(0, caller_project)
-        candidates = [companion(project) for project in projects] if t.get('job') and t.get('worktree') else []
-        candidates = list(dict.fromkeys(cc for cc in candidates if cc))
+        candidates = list(dict.fromkeys(path for path in map(companion, projects) if path))
         if not candidates:
-            if closed:
-                continue  # The slot remains occupied until terminal evidence is available.
-            print('PROBLEM {}: missing companion/job/worktree; reconcile manually'.format(tid))
-            problem = True
+            if explicit or not closed:
+                report_problem(observe(tid, 'unavailable'), 'missing Codex companion. Reconcile manually.')
             continue
-        for cc in candidates:
-            args = ['node', cc]
-            r = run(args + ['status', t['job'], '--cwd', t['worktree'], '--json'])
-            try:
-                data = json.loads(r.stdout)
-                status = data['job']['status']
-            except (ValueError, KeyError, TypeError):
-                status = None
-            usable = not r.returncode and status in (
-                'running', 'queued', 'completed', 'done', 'failed', 'cancelled', 'canceled', 'error')
-            if usable:
-                break
-        if not usable:
-            print('PROBLEM {}: invalid/unavailable job status; reconcile before retry'.format(tid))
-            problem = True
+        status, args = query_codex_status(candidates, job, checkout)
+        event = observe(tid, status)
+        if args is None:
+            report_problem(event, 'invalid or unavailable job status, reconcile before retrying')
             continue
         if status in ('running', 'queued'):
             print('{}: {}'.format(tid, status))
             if not closed:
-                rows.append(dict(event='seen', id=tid))
+                rows.append(dict(event, event='seen'))
+            elif explicit:
+                rows.append(event)
             continue
-        terminal = 'done' if status in ('completed', 'done') else 'failed'
+        terminal = 'done' if status == 'done' else 'failed'
         if closed:
-            rows.append(dict(event='finish', id=tid, status=terminal, preserve_closed=True,
+            rows.append(dict(event, event='finish', status=terminal, preserve_closed=True,
                              summary='Closed Codex job reported ' + status))
             continue
-        result = run(args + ['result', t['job'], '--cwd', t['worktree']])
+        result = run(args + ['result', job, '--cwd', checkout])
         if result.returncode:
-            print('PROBLEM {}: result unavailable; reconcile manually'.format(tid))
-            problem = True
+            report_problem(event, 'terminal result unavailable. Reconcile manually.')
             continue
-        event = dict(event='finish', id=tid, status=terminal, summary=result.stdout.strip()[:2000])
+        finish = dict(event, event='finish', status=terminal, summary=result.stdout.strip()[:2000])
         if terminal == 'done':
             try:
-                event.update(codex_delivery(root, t))
+                finish.update(codex_delivery(root, task))
             except SystemExit as exc:
-                print('PROBLEM {}: {}'.format(tid, exc))
-                problem = True
+                report_problem(event, str(exc))
                 continue
-        rows.append(event)
+        rows.append(finish)
+        if explicit:
+            print('{}: {}'.format(tid, status))
     append_checked(root, rows, stamp)
-    return max(1 if problem else 0, cmd_agy_sync(a))
+    return 1 if problem else 0
+
+
+def cmd_poll(a):
+    if a.id is not None:
+        valid_id(a.id)
+    root = repo_root()
+    if a.executor == 'agy' and a.id is None:
+        return sync_agy(root, observe_incomplete=True)
+    known, stamp = snapshot(root)
+    if a.id is not None:
+        task = known.get(a.id)
+        if not task:
+            fail('unknown task ' + a.id)
+        executor = task.get('executor')
+        if executor == 'cloud':
+            fail('Cloud tasks use cloud-collect')
+        if a.executor and a.executor != executor:
+            fail('{} uses {}. Select that executor or omit --executor.'.format(a.id, executor))
+        if executor == 'agy':
+            return sync_agy(root, task_id=a.id)
+        if executor != 'codex' or task.get('status') != 'running':
+            print('{}: no running Codex registration'.format(a.id))
+            return 0
+        return poll_codex(root, [task], stamp, explicit=True)
+    codex = [task for task in known.values() if task.get('executor') == 'codex' and task.get('status') == 'running']
+    result = poll_codex(root, codex, stamp, explicit=bool(a.executor))
+    return result if a.executor else max(result, sync_agy(root))
 
 
 def fetch_branch(branch, root):
@@ -1386,7 +1576,7 @@ def recorded_cloud_delivery(task):
     return None
 
 
-def validate_report(data, tid, t, ref, root, branch):
+def cloud_report_shape_errors(data, tid, base):
     if not isinstance(data, dict):
         return ['expected JSON object']
     reasons = []
@@ -1421,34 +1611,54 @@ def validate_report(data, tid, t, ref, root, branch):
     except ValueError:
         reasons.append('utc must be an ISO timestamp with UTC offset')
     reported = data.get('base')
-    base = t.get('base', '')
     if not isinstance(reported, str) or not SHA_RE.fullmatch(reported) or not base.startswith(reported):
         reasons.append('base mismatch')
-    head = data.get('head')
-    if not isinstance(head, str) or not SHA_RE.fullmatch(head) or not ancestor(head, ref, root):
+    return reasons
+
+
+def cloud_report_history(root, data, task, ref):
+    head = cloud_commit(root, data.get('head'))
+    if not head or not ancestor(head, ref, root):
+        return None, False, None, None
+    message = git('log', '-1', '--format=%B', head, cwd=root) if data.get('status') == 'done' else None
+    main = task.get('main') or require_main(root)
+    base = task.get('base', '')
+    if not base or not ancestor(base, head, root):
+        return head, False, message, None
+    main_ref = 'refs/heads/' + main
+    if not ancestor(base, main_ref, root):
+        main_ref = 'refs/remotes/origin/' + main
+    if not ancestor(base, main_ref, root):
+        # The pinned commit is authoritative when neither local ref has caught
+        # up to the branch fetched during handoff.
+        main_ref = base
+    fork = git('merge-base', ref, main_ref, check=False, cwd=root).strip()
+    return head, True, message, fork
+
+
+def cloud_report_history_errors(data, tid, base, branch, history):
+    head, descends_from_base, message, fork = history
+    reasons = []
+    if not head:
         reasons.append('head missing or not an ancestor of session branch')
-    elif not base or not ancestor(base, head, root):
+    elif not descends_from_base:
         reasons.append('base is not an ancestor of head')
     if data.get('branch') != branch:
         reasons.append('branch mismatch (status.branch must name the fetched branch)')
-    if isinstance(head, str) and SHA_RE.fullmatch(head) and ancestor(head, ref, root):
-        if data.get('status') == 'done':
-            message = git('log', '-1', '--format=%B', head, cwd=root)
-            resolved_head = git('rev-parse', '--verify', head + '^{commit}', cwd=root).strip()
-            if resolved_head == base or not re.search(r'(?<![\w.-])' + re.escape(tid) + r'(?![\w.-])', message):
-                reasons.append('done requires an implementation commit with this task id')
-        main = t.get('main') or require_main(root)
-        if base and ancestor(base, head, root):
-            main_ref = 'refs/heads/' + main
-            if not ancestor(base, main_ref, root):
-                main_ref = 'refs/remotes/origin/' + main
-            if not ancestor(base, main_ref, root):
-                # The pinned commit is authoritative when neither local ref
-                # has caught up to the branch fetched during handoff.
-                main_ref = base
-            fork = git('merge-base', ref, main_ref, check=False, cwd=root).strip()
-            if fork != base:
-                reasons.append('session fork point must equal the pinned base')
+    if head and message is not None and (head == base or not re.search(
+            r'(?<![\w.-])' + re.escape(tid) + r'(?![\w.-])', message)):
+        reasons.append('done requires an implementation commit with this task id')
+    if descends_from_base and fork != base:
+        reasons.append('session fork point must equal the pinned base')
+    return reasons
+
+
+def validate_report(data, tid, task, ref, root, branch):
+    base = task.get('base', '')
+    reasons = cloud_report_shape_errors(data, tid, base)
+    if isinstance(data, dict):
+        history = cloud_report_history(root, data, task, ref)
+        reasons.extend(cloud_report_history_errors(data, tid, base, branch, history))
     return reasons
 
 
@@ -1503,17 +1713,89 @@ def sensitive_paths(root, base, head, tid, brief=None, cache=None):
     return result
 
 
-def cmd_cloud_collect(a):
-    root = repo_root()
-    tasks, stamp = snapshot(root)
+def session_status_entries(root, ref, branch, cloud, base_entries):
+    entries = cloud_status_entries(root, ref)
+    bases = {task['base'] for tid, task in cloud.items() if task.get('base') and
+             (task.get('branch') == branch or (not task.get('branch') and STATUS_DIR + '/' + tid + '.json' in entries))}
+    branch_history = {}
+    for base in sorted(bases):
+        if not ancestor(base, ref, root):
+            continue
+        if base not in base_entries:
+            base_entries[base] = cloud_status_entries(root, base)
+        if any(base_entries[base].get(name) == entry for name, entry in entries.items()):
+            branch_history[base], _ = history_paths(root, base, ref, STATUS_DIR)
+    for name, entry in entries.items():
+        tid = Path(name).stem
+        task = cloud.get(tid)
+        # A merged session may leave its reports in the base of later
+        # sessions. Check owned reports and skip only untouched carryovers.
+        if (task is None or task.get('branch') != branch) and any(
+                name not in changed and base_entries[base].get(name) == entry
+                for base, changed in branch_history.items()):
+            continue
+        yield name, tid, entry
+
+
+def select_cloud_batches(cloud, pending, rejected, *, seen, batch_branches, fetched, fetch_errors,
+                         batch_filter, discover):
+    """Choose the eligible finish rows using the snapshot and collected facts."""
+    bad = {key: list(messages) for key, messages in rejected.items()}
+
+    def group(tid):
+        return cloud_batch_key(cloud[tid])
+
+    def problem(tid, message):
+        bad.setdefault(group(tid), []).append(message)
+
+    for row in pending:
+        tid = row['id']
+        destinations = batch_branches.get(cloud[tid].get('batch_id'), ())
+        if len(destinations) > 1:
+            problem(tid, 'PROBLEM {}: one envelope must use a single session branch'.format(tid))
+    batches = {group(tid) for tid, t in cloud.items() if tid in seen or t.get('branch') in fetched}
+    if batch_filter and (discover or not batches) and (fetched or not fetch_errors):
+        batches.update(group(tid) for tid in cloud)
+    relevant = {tid: t for tid, t in cloud.items()
+                if tid in seen or t.get('branch') in fetched or (discover and t.get('branch')) or
+                (not t.get('branch') and group(tid) in batches)}
+    for tid, t in relevant.items():
+        if t.get('branch') in fetch_errors:
+            problem(tid, 'PROBLEM {}: assigned session branch could not be fetched'.format(tid))
+        elif tid not in seen and t.get('status') == 'running':
+            problem(tid, 'MISSING ' + tid)
+        elif tid not in seen and t.get('report') and t.get('branch') in fetched:
+            problem(tid, 'CHANGED {}: recorded report is missing from {}'.format(tid, t['branch']))
+
+    def check_distinct_heads(rows, within_batch):
+        owners = {}
+        for row in rows:
+            tid = row['id']
+            key = (group(tid), row['head']) if within_batch else row['head']
+            peer = owners.setdefault(key, tid)
+            if peer != tid:
+                problem(peer, 'PROBLEM {}: done heads must be distinct from {}'.format(peer, tid))
+                problem(tid, 'PROBLEM {}: done heads must be distinct from {}'.format(tid, peer))
+
+    # An invalid batch cannot claim heads against unrelated eligible work.
+    candidates = [row for row in pending if row['status'] == 'done' and '*' not in bad and group(row['id']) not in bad]
+    check_distinct_heads(candidates, within_batch=True)
+    check_distinct_heads([row for row in candidates if group(row['id']) not in bad], within_batch=False)
+    accepted = [row for row in pending if '*' not in bad and group(row['id']) not in bad]
+    return accepted, tuple(relevant), bad
+
+
+def collect_cloud_reports(root, tasks, *, branch, discover, batch, main, emit):
+    """Acquire published reports without holding the ledger lock."""
     cloud = {k: t for k, t in tasks.items()
-             if t.get('executor') == 'cloud' and not t.get('closed') and (not a.batch or t.get('batch') == a.batch)}
-    if not a.branch and not a.discover:
+             if t.get('executor') == 'cloud' and not t.get('closed') and (not batch or t.get('batch') == batch)}
+    if not branch and not discover:
         fail('cloud-collect requires --branch or --discover')
-    if a.branch and not a.branch.startswith('claude/'):
+    if branch and not branch.startswith('claude/'):
         fail('--branch must start with claude/')
-    branches = [a.branch] if a.branch else []
-    if a.discover:
+    selected_branch = branch
+    branches = [branch] if branch else []
+    if discover:
         for line in git('ls-remote', '--heads', 'origin', 'claude/*', cwd=root).splitlines():
             refname = line.split('\t')[-1]
             if not refname.startswith('refs/heads/claude/'):
@@ -1521,7 +1803,7 @@ def cmd_cloud_collect(a):
             branch = refname[len('refs/heads/'):]
             if branch not in branches:
                 branches.append(branch)
-    main = require_main(root, a.main) if cloud else None
+    default_main = require_main(root, main) if cloud else None
     seen, pending, fingerprints = set(), [], {}
     bad, diffs, warned = {}, {}, set()
     fetched, fetch_errors, base_entries = set(), set(), {}
@@ -1549,44 +1831,26 @@ def cmd_cloud_collect(a):
         paths += sensitive_paths(root, head, ref, tid, t.get('brief'), diffs)
         for path in paths:
             if path not in warned:
-                print('WARN SENSITIVE ' + display_cloud_name(path) + ' (untrusted changes; inspect before tests/merge)')
+                emit('WARN SENSITIVE ' + display_cloud_name(path) + ' (untrusted changes; inspect before tests/merge)')
                 warned.add(path)
 
     for branch in branches:
         try:
             ref = fetch_branch(branch, root)
         except SystemExit:
-            if not a.discover:
+            if not discover:
                 raise
             fetch_errors.add(branch)
             # Transport diagnostics may include private origin URLs.
-            print('PROBLEM {}: could not fetch discovered branch'.format(display_cloud_name(branch)))
+            emit('PROBLEM {}: could not fetch discovered branch'.format(display_cloud_name(branch)))
             continue
         fetched.add(branch)
-        entries = cloud_status_entries(root, ref)
-        bases = {task['base'] for tid, task in cloud.items() if task.get('base') and
-                 (task.get('branch') == branch or (not task.get('branch') and STATUS_DIR + '/' + tid + '.json' in entries))}
-        branch_history = {}
-        for base in sorted(bases):
-            if not ancestor(base, ref, root):
-                continue
-            if base not in base_entries:
-                base_entries[base] = cloud_status_entries(root, base)
-            if any(base_entries[base].get(name) == entry for name, entry in entries.items()):
-                branch_history[base], _ = history_paths(root, base, ref, STATUS_DIR)
-        for name, entry in entries.items():
-            tid = Path(name).stem
+        for name, tid, entry in session_status_entries(root, ref, branch, cloud, base_entries):
             t = cloud.get(tid)
-            # A merged session may leave its reports in the base of later
-            # sessions. Check owned reports and skip only untouched carryovers.
-            if (t is None or t.get('branch') != branch) and any(
-                    name not in changed and base_entries[base].get(name) == entry
-                    for base, changed in branch_history.items()):
-                continue
             if tid in tasks and tid not in cloud and tasks[tid].get('executor') == 'cloud':
                 continue  # Ignore closed and unselected tasks before validating remote data.
-            if tid not in cloud and a.discover:
-                print('SKIP foreign ' + display_cloud_name(tid) + ': no assignment in selected ledger/batch')
+            if tid not in cloud and discover:
+                emit('SKIP foreign ' + display_cloud_name(tid) + ': no assignment in selected ledger/batch')
                 continue
             if name != STATUS_DIR + '/' + tid + '.json' or not ID_RE.fullmatch(tid):
                 bad.setdefault('*', []).append('PROBLEM {}: invalid status path'.format(display_cloud_name(name)))
@@ -1596,7 +1860,7 @@ def cmd_cloud_collect(a):
                 continue
             seen.add(tid)
             if t.get('status') != 'running' and not t.get('report'):
-                print('SKIP {}: manually finished; reconcile before import'.format(tid))
+                emit('SKIP {}: manually finished; reconcile before import'.format(tid))
                 continue
             if t.get('branch') and t['branch'] != branch:
                 problem(tid, 'PROBLEM {}: report on {} but bound to {}'.format(tid, branch, t['branch']))
@@ -1629,7 +1893,7 @@ def cmd_cloud_collect(a):
                     else:
                         warn_changes(t, tid, head, ref)
                 continue
-            reasons = validate_report(data, tid, dict(t, main=a.main or t.get('main') or main), ref, root, branch)
+            reasons = validate_report(data, tid, dict(t, main=main or t.get('main') or default_main), ref, root, branch)
             if reasons:
                 problem(tid, 'PROBLEM {}: {}'.format(tid, '; '.join(reasons)))
                 continue
@@ -1658,73 +1922,55 @@ def cmd_cloud_collect(a):
             if t.get('batch_id'):
                 batch_branches.setdefault(t['batch_id'], set()).add(branch)
             pending.append(dict(event='finish', id=tid, status=data['status'], summary=data['summary'],
-                                head=head, tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch))
-    for row in pending:
-        tid = row['id']
-        destinations = batch_branches.get(cloud[tid].get('batch_id'), set())
-        if len(destinations) > 1:
-            problem(tid, 'PROBLEM {}: one envelope must use a single session branch'.format(tid))
-    batches = {group(tid) for tid, t in cloud.items() if tid in seen or t.get('branch') in fetched}
-    if a.batch and (a.discover or not batches) and (fetched or not fetch_errors):
-        batches.update(group(tid) for tid in cloud)
+                                head=head, tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch,
+                                observation=executor_observation('cloud', data['status'])))
     for tid, t in cloud.items():
-        if a.branch and t.get('branch') and t['branch'] not in branches and tid not in seen:
-            print('UNCOLLECTED {}: bound to {} (not selected)'.format(tid, t['branch']))
-    relevant = {tid: t for tid, t in cloud.items()
-                if tid in seen or t.get('branch') in fetched or
-                (a.discover and t.get('branch')) or (not t.get('branch') and group(tid) in batches)}
-    for tid, t in relevant.items():
-        if t.get('branch') in fetch_errors:
-            problem(tid, 'PROBLEM {}: assigned session branch could not be fetched'.format(tid))
-        elif tid not in seen and t.get('status') == 'running':
-            problem(tid, 'MISSING ' + tid)
-        elif tid not in seen and t.get('report') and t.get('branch') in fetched:
-            problem(tid, 'CHANGED {}: recorded report is missing from {}'.format(tid, t['branch']))
-    # Atomic per batch: a malformed peer blocks its own batch, not unrelated work.
-    def check_distinct_heads(rows, within_batch):
-        owners = {}
-        for row in rows:
-            tid = row['id']
-            key = (group(tid), row['head']) if within_batch else row['head']
-            peer = owners.setdefault(key, tid)
-            if peer != tid:
-                problem(peer, 'PROBLEM {}: done heads must be distinct from {}'.format(peer, tid))
-                problem(tid, 'PROBLEM {}: done heads must be distinct from {}'.format(tid, peer))
+        if selected_branch and t.get('branch') and t['branch'] not in branches and tid not in seen:
+            emit('UNCOLLECTED {}: bound to {} (not selected)'.format(tid, t['branch']))
+    accepted, relevant, bad = select_cloud_batches(cloud, pending, bad, seen=seen, batch_branches=batch_branches,
+                                                   fetched=fetched, fetch_errors=fetch_errors,
+                                                   batch_filter=batch, discover=discover)
+    return accepted, relevant, bad, branches, bool(fetch_errors)
 
-    candidates = [row for row in pending if row['status'] == 'done' and '*' not in bad and group(row['id']) not in bad]
-    check_distinct_heads(candidates, within_batch=True)
-    check_distinct_heads([row for row in candidates if group(row['id']) not in bad], within_batch=False)
-    accepted = [row for row in pending if '*' not in bad and group(row['id']) not in bad]
-    accepted_groups = {group(row['id']) for row in accepted}
-    accepted_heads = {row['head'] for row in accepted if row['status'] == 'done'}
+
+def cloud_collection_dependencies(states, groups, heads, branches, discover):
+    relevant_tasks = {}
+    for tid, task in states.items():
+        if task.get('executor') != 'cloud':
+            continue
+        branch = task.get('branch')
+        in_group = cloud_batch_key(task) in groups and (discover or not branch or branch in branches)
+        delivery = recorded_cloud_delivery(task)
+        conflicts = delivery and any(head.startswith(delivery) for head in heads)
+        if in_group or conflicts:
+            relevant_tasks[tid] = (task.get('status'), branch, task.get('closed'), task.get('head'),
+                                   task.get('report_sha256'))
+    return relevant_tasks
+
+
+def cmd_cloud_collect(a):
+    root = repo_root()
+    tasks, stamp = snapshot(root)
+    accepted, relevant, bad, branches, fetch_failed = collect_cloud_reports(
+        root, tasks, branch=a.branch, discover=a.discover, batch=a.batch, main=a.main, emit=print)
+    groups = {cloud_batch_key(tasks[row['id']]) for row in accepted}
+    heads = {row['head'] for row in accepted if row['status'] == 'done'}
 
     def dependencies(states):
-        relevant_tasks = {}
-        for tid, task in states.items():
-            if task.get('executor') != 'cloud':
-                continue
-            branch = task.get('branch')
-            in_group = cloud_batch_key(task) in accepted_groups and (a.discover or not branch or branch in branches)
-            delivery = recorded_cloud_delivery(task)
-            conflicts = delivery and any(head.startswith(delivery) for head in accepted_heads)
-            if in_group or conflicts:
-                relevant_tasks[tid] = (task.get('status'), branch, task.get('closed'), task.get('head'),
-                                       task.get('report_sha256'))
-        return relevant_tasks
+        return cloud_collection_dependencies(states, groups, heads, branches, a.discover)
 
     append_checked(root, accepted, stamp, dependencies=dependencies)
-    for row in accepted:
-        tasks[row['id']]['status'] = row['status']
     for messages in bad.values():
         for message in messages:
             print(message)
+    accepted_status = {row['id']: row['status'] for row in accepted}
     counts = {}
     for tid in relevant:
-        status = tasks[tid].get('status', 'running')
+        status = accepted_status.get(tid, tasks[tid].get('status', 'running'))
         counts[status] = counts.get(status, 0) + 1
     print('cloud progress: ' + (', '.join('{} {}'.format(k, v) for k, v in sorted(counts.items())) or 'no cloud tasks'))
     print('Next: inspect untrusted diffs before tests; verify each task in verify-<batch>, record independent verdicts; merge accepted tasks only with user authorization.')
-    return 1 if bad or fetch_errors else 0
+    return 1 if bad or fetch_failed else 0
 
 
 def main():
@@ -1749,20 +1995,32 @@ def main():
     s = sub.add_parser('verify'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
     s.add_argument('--by', required=True); s.add_argument('--verdict', required=True, choices=('pass', 'fixes', 'reject'))
     s.add_argument('--head'); s.add_argument('--evidence', required=True); s.set_defaults(fn=cmd_verify)
-    s = sub.add_parser('merge'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
+    s = sub.add_parser('merge', help='record an integration already performed in Git'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
     s.add_argument('--commit', required=True); s.add_argument('--main'); s.set_defaults(fn=cmd_merge)
     s = sub.add_parser('ack'); s.add_argument('--id', required=True); s.add_argument('--hours', type=acknowledgement_hours, default=4)
     s.set_defaults(fn=cmd_ack, force=False)
     s = sub.add_parser('close'); s.add_argument('--id', required=True); s.add_argument('--reason', required=True)
     s.add_argument('--force', action='store_true'); s.set_defaults(fn=cmd_close)
-    s = sub.add_parser('status'); s.add_argument('--open', action='store_true'); s.add_argument('--stale-hours', type=positive_hours, default=4); s.set_defaults(fn=cmd_status)
+    s = sub.add_parser('status', help='read recorded task status without contacting executors',
+                       description='Read this repository’s ledger. Provider observations are recorded evidence. '
+                                   'Text columns show ID, executor, state, verdict, reader, merge commit and flags.')
+    s.add_argument('--id', help='show one exact task ID')
+    s.add_argument('--executor', choices=EXECUTORS, help='show tasks for this executor')
+    s.add_argument('--state', choices=TASK_STATES, help='filter the recorded ledger state')
+    s.add_argument('--open', action='store_true', help='show tasks that still need attention')
+    s.add_argument('--stale-hours', type=positive_hours, default=4, help='mark running tasks stale after this many hours')
+    s.add_argument('--json', action='store_true', help='emit versioned JSON with task metadata')
+    s.set_defaults(fn=cmd_status)
     s = sub.add_parser('hook'); s.add_argument('--stale-hours', type=positive_hours, default=4); s.set_defaults(fn=cmd_hook)
     s = sub.add_parser('pause'); s.add_argument('--executor', choices=EXECUTORS, required=True); s.add_argument('--resume', action='store_true'); s.set_defaults(fn=cmd_pause)
-    sub.add_parser('poll').set_defaults(fn=cmd_poll)
-    s = sub.add_parser('agy-sync'); s.add_argument('--delegate-exit'); s.add_argument('--out'); s.set_defaults(fn=cmd_agy_sync)
+    s = sub.add_parser('poll', help='refresh recorded Codex jobs and local agy artifacts')
+    s.add_argument('--id', help='refresh just this recorded task. Use cloud-collect for Cloud.')
+    s.add_argument('--executor', choices=('codex', 'agy'), help='refresh only this executor')
+    s.set_defaults(fn=cmd_poll)
+    s = sub.add_parser('agy-sync', help='import locally available agy artifacts'); s.add_argument('--delegate-exit'); s.add_argument('--out'); s.set_defaults(fn=cmd_agy_sync)
     s = sub.add_parser('cloud-envelope'); s.add_argument('--brief'); s.add_argument('--tasks', required=True, nargs='+')
     s.add_argument('--branch'); s.add_argument('--main'); s.add_argument('--reprint', action='store_true'); s.set_defaults(fn=cmd_cloud_envelope)
-    s = sub.add_parser('cloud-collect'); s.add_argument('--branch'); s.add_argument('--discover', action='store_true')
+    s = sub.add_parser('cloud-collect', help='fetch and import published cloud reports'); s.add_argument('--branch'); s.add_argument('--discover', action='store_true')
     s.add_argument('--batch'); s.add_argument('--main'); s.set_defaults(fn=cmd_cloud_collect)
     a = p.parse_args()
     # POSIX argv uses surrogateescape for undecodable bytes. Repair before any
@@ -1773,9 +2031,6 @@ def main():
         elif isinstance(value, list):
             setattr(a, key, [v.encode('utf-8', errors='surrogateescape').decode('utf-8', errors='replace')
                              if isinstance(v, str) else v for v in value])
-    if a.cmd in ('init', 'assign', 'finish', 'verify', 'merge', 'pause', 'ack', 'close'):
-        with ledger_lock(repo_root()):
-            return a.fn(a)
     return a.fn(a)
 
 

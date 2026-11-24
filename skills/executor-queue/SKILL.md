@@ -8,14 +8,14 @@ disable-model-invocation: true
 
 # Executor queue
 
-version: 3.5.0
+version: 3.6.0
 ## Decide and prepare
 
 Use the project's ledger/queue if AGENTS.md or CLAUDE.md defines one. Use xq only when none exists.
 Get explicit authorization for the task, executor, files and any network destination before delegation. Codex works in a worktree, agy reviews named nonconfidential files, and cloud works from pushed briefs.
 Run `python3 "${CLAUDE_SKILL_DIR}/scripts/xq.py"` wherever `xq.py` appears below. On Windows use `py -3` or your Python 3.8+ command.
-xq records work and queries existing jobs. Cloud commands fetch from origin.
-Run `xq.py init`, then `xq.py doctor --offline --need codex` (or `agy`, `cloud`, comma-separated). Run live probes only with authorized network access.
+For status-only requests run `xq.py status`. Use `--state`, `--executor`, `--id` and `--json` for a filtered ledger view. Setup or refresh needs a separate request.
+To set up a queue, run `xq.py init` then `xq.py doctor --offline --need codex` (or `agy`, `cloud`). Run live probes only with authorized network access.
 Use the quoted CC/AGYB paths it resolves. agy-bridge requires macOS or Linux. Installation and sign-in are user actions.
 agy requires working `queue --help` AND `verdict --help`; numeric versions alone do not establish support.
 State is shared across worktrees via the main checkout's `.agents/ledger.jsonl`;
@@ -30,7 +30,7 @@ Every Codex brief must say: “Read and write only in this worktree; do not open
 or the main checkout. If a key is needed, report blocked.” This is an instruction boundary, not OS read isolation.
 No brief grants network, paid calls, commit, push or merge permission by itself. Do not invent tasks to fill idle time.
 Record actual results: `xq.py finish --id <id> --status done|failed|blocked --summary '<actual result>'`.
-`xq.py status --open` includes passed Codex/cloud tasks until merged; `xq.py poll` imports recorded Codex terminal results and agy status.
+`status --open` shows tasks needing attention. `status --state running` includes occupied closed slots. For authorized refresh use `poll --id <id>` or `poll --executor codex|agy`; cloud requires `cloud-collect`.
 ## Codex
 
 Git >= 2.31 is required for `--path-format`; doctor reports the version and warns below 2.31.

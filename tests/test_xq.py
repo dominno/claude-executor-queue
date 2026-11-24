@@ -17,17 +17,8 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'skills/executor-queue/scripts/xq
 
 
 @pytest.fixture
-def q(tmp_path, monkeypatch):
-    for key in tuple(os.environ):
-        if key.startswith('GIT_') or key.startswith('XQ_') or key == 'CLAUDE_CONFIG_DIR':
-            monkeypatch.delenv(key)
-    home = tmp_path / 'home'
-    home.mkdir()
-    monkeypatch.setenv('HOME', str(home))
-    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
-    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
-    monkeypatch.setenv('GIT_ALLOW_PROTOCOL', 'file')
-    monkeypatch.setenv('GIT_TERMINAL_PROMPT', '0')
+def q(tmp_path, monkeypatch, isolated_queue_environment):
+    home = isolated_queue_environment
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.chdir(repo)
@@ -126,12 +117,89 @@ def verify(q, tid='local', verdict='pass'):
     return q.cli('verify', '--id', tid, '--by', 'reader', '--verdict', verdict, '--evidence', 'checked')
 
 
+def test_status_json_empty_ledger_leaves_checkout_untouched(q, capsys):
+    exclude = q.repo / '.git/info/exclude'
+    before = exclude.read_bytes() if exclude.exists() else None
+    assert q.cli('status', '--json') == 0
+    assert json.loads(capsys.readouterr().out) == {'schema_version': 1, 'tasks': []}
+    assert not (q.repo / '.agents/ledger.jsonl').exists()
+    assert not (q.repo / '.agents/ledger.lock').exists()
+    assert (exclude.read_bytes() if exclude.exists() else None) == before
+    with pytest.raises(SystemExit, match='invalid task id'):
+        q.cli('status', '--id', '', '--json')
+
+
+def test_status_json_combines_filters_and_allowlists_observations(q, monkeypatch, capsys):
+    stamp = '2026-11-08T20:00:00Z'
+    q.xq.append_many(q.repo, [
+        dict(event='assign', id='running-codex', executor='codex', worktree='/private/worktree',
+             job='provider-job', note='private note'),
+        dict(event='seen', id='running-codex', observation={
+            'source': 'codex', 'state': 'running', 'observed_at': stamp, 'raw': 'private backend response',
+        }),
+        dict(event='close', id='running-codex', reason='dropped'),
+        dict(event='assign', id='queued-agy', executor='agy', queued=True),
+        dict(event='assign', id='cloud-assignment', executor='cloud'),
+    ])
+    ledger = q.repo / '.agents/ledger.jsonl'
+    before = ledger.read_bytes()
+    original = q.xq.run
+
+    def local_only(argv, **kwargs):
+        assert argv == ['git', 'rev-parse', '--git-common-dir']
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(q.xq, 'run', local_only)
+
+    assert q.cli('status', '--id', 'running-codex', '--executor', 'codex', '--state', 'running', '--json') == 0
+    assert json.loads(capsys.readouterr().out) == {'schema_version': 1, 'tasks': [{
+        'id': 'running-codex', 'executor': 'codex', 'attempt': 1, 'state': 'running',
+        'verdict': None, 'merged': False, 'closed': True, 'stale': False, 'occupies_slot': True,
+        'observation': {'source': 'codex', 'state': 'running', 'observed_at': stamp},
+    }]}
+    assert q.cli('status', '--executor', 'codex', '--open', '--json') == 0
+    assert json.loads(capsys.readouterr().out)['tasks'] == []
+    assert q.cli('status', '--state', 'running', '--json') == 0
+    running = {row['id']: row for row in json.loads(capsys.readouterr().out)['tasks']}
+    assert set(running) == {'running-codex', 'cloud-assignment'}
+    assert running['cloud-assignment']['observation'] is None
+    assert running['cloud-assignment']['occupies_slot'] is False
+    assert ledger.read_bytes() == before
+
+
+def test_poll_agy_executor_records_unconfirmed_jobs_without_other_providers(q, capsys):
+    q.assign('agy-review', 'agy')
+    q.assign('other-codex', 'codex')
+    assert q.cli('poll', '--executor', 'agy') == 0
+    assert 'no bridge artifact found' in capsys.readouterr().out
+    tasks = q.xq.state(q.repo)
+    assert tasks['agy-review']['observation']['state'] == 'unknown'
+    assert tasks['agy-review']['status'] == 'running'
+    assert 'seen' not in tasks['agy-review']
+    assert 'observation' not in tasks['other-codex']
+
+
 def test_hook_honours_stop_active(q, capsys):
     q.assign()
     finish(q)
     q.monkeypatch.setattr(sys, 'stdin', io.StringIO('{"stop_hook_active":true}'))
     assert q.cli('hook') == 0
     assert 'not verified' in capsys.readouterr().err
+
+
+def test_hook_reuses_ledger_state_for_capacity(q, monkeypatch, capsys):
+    q.assign('local', 'codex', '--queued')
+    read_state = q.xq.state
+    reads = []
+
+    def track_state(root):
+        reads.append(root)
+        return read_state(root)
+
+    monkeypatch.setattr(q.xq, 'state', track_state)
+    assert q.cli('hook') == 2
+    assert 'next queued item local' in capsys.readouterr().err
+    assert reads == [q.repo]
 
 
 @pytest.mark.parametrize('executor', ['codex', 'agy'])
@@ -730,6 +798,101 @@ def test_poll_failure_is_not_a_finish_and_stale_status(q, capsys):
     assert 'STALE' in capsys.readouterr().out
 
 
+def test_poll_scope_keeps_other_registered_work_offline(q, monkeypatch):
+    q.assign('local', 'codex', '--job', 'first', '--worktree', str(q.repo))
+    q.assign('second', 'codex', '--job', 'second', '--worktree', str(q.repo))
+    q.assign('review', 'agy')
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    calls = []
+    agy_calls = []
+    original = q.xq.run
+
+    def fake_run(argv, **kwargs):
+        if argv[0] != 'node':
+            return original(argv, **kwargs)
+        calls.append((argv[2], argv[3]))
+        assert argv[2] == 'status'
+        state = 'running' if argv[3] == 'first' else 'queued'
+        return subprocess.CompletedProcess(argv, 0, json.dumps({'job': {'id': argv[3], 'status': state}}), '')
+
+    def fake_agy(root, *, task_id=None, observe_incomplete=False):
+        assert root == q.repo
+        agy_calls.append((task_id, observe_incomplete))
+        return 0
+
+    monkeypatch.setattr(q.xq, 'run', fake_run)
+    monkeypatch.setattr(q.xq, 'sync_agy', fake_agy)
+    assert q.cli('poll', '--id', 'local', '--executor', 'codex') == 0
+    assert calls == [('status', 'first')] and agy_calls == []
+    assert 'observation' not in q.xq.state(q.repo)['second']
+    assert q.cli('poll', '--id', 'review') == 0
+    assert q.cli('poll', '--executor', 'agy') == 0
+    assert calls == [('status', 'first')] and agy_calls == [('review', False), (None, True)]
+    assert q.cli('poll', '--executor', 'codex') == 0
+    assert calls == [('status', 'first'), ('status', 'first'), ('status', 'second')]
+    assert agy_calls == [('review', False), (None, True)]
+    second = q.xq.state(q.repo)['second']
+    assert second['status'] == 'running' and second['seen']
+    assert second['observation']['source'] == 'codex'
+    assert second['observation']['state'] == 'queued'
+
+
+def test_poll_refuses_unknown_mismatched_and_cloud_ids(q, monkeypatch):
+    q.assign()
+    q.xq.append(q.repo, dict(event='assign', id='cloud-task', executor='cloud'))
+    before = q.xq.events(q.repo)
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
+    with pytest.raises(SystemExit, match='invalid task id'):
+        q.cli('poll', '--id', '')
+    with pytest.raises(SystemExit, match='unknown task missing'):
+        q.cli('poll', '--id', 'missing')
+    with pytest.raises(SystemExit, match='local uses codex'):
+        q.cli('poll', '--executor', 'agy', '--id', 'local')
+    with pytest.raises(SystemExit, match='use cloud-collect'):
+        q.cli('poll', '--id', 'cloud-task')
+    assert q.xq.events(q.repo) == before
+
+
+@pytest.mark.parametrize(('status_rc', 'status_payload', 'observed'), [
+    (1, '', 'unavailable'),
+    (0, '{"job":{"status":"unsupported"}}', 'unknown'),
+    (0, '{"job":{"id":"another-job","status":"completed"}}', 'unknown'),
+    (0, '{"job":{"status":"completed"}}', 'done'),
+])
+def test_scoped_codex_poll_problem_records_observation_without_heartbeat(q, monkeypatch, status_rc,
+                                                                         status_payload, observed):
+    q.assign('local', 'codex', '--job', 'job', '--worktree', str(q.repo))
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    original = q.xq.run
+
+    def fake_run(argv, **kwargs):
+        if argv[0] != 'node':
+            return original(argv, **kwargs)
+        if argv[2] == 'status':
+            return subprocess.CompletedProcess(argv, status_rc, status_payload, '')
+        assert observed == 'done' and argv[2] == 'result'
+        return subprocess.CompletedProcess(argv, 1, '', 'not available')
+
+    monkeypatch.setattr(q.xq, 'run', fake_run)
+    assert q.cli('poll', '--id', 'local') == 1
+    task = q.xq.state(q.repo)['local']
+    assert task['status'] == 'running' and 'seen' not in task and 'finished' not in task
+    assert task['observation']['source'] == 'codex' and task['observation']['state'] == observed
+    assert q.xq.parse_timestamp(task['observation']['observed_at'])
+    assert q.xq.events(q.repo)[-1]['event'] == 'observe'
+
+
+def test_scoped_codex_poll_refuses_foreign_worktree_before_plugin_lookup(q, monkeypatch):
+    foreign = q.tmp_path / 'foreign checkout'
+    q.git('init', '-b', 'main', str(foreign))
+    q.assign('local', 'codex', '--job', 'job', '--worktree', str(foreign))
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
+    assert q.cli('poll', '--executor', 'codex', '--id', 'local') == 1
+    task = q.xq.state(q.repo)['local']
+    assert task['status'] == 'running' and 'seen' not in task
+    assert task['observation']['state'] == 'unavailable'
+
+
 def test_init_does_not_truncate_ledger(q):
     q.assign()
     before = q.xq.events(q.repo)
@@ -755,8 +918,9 @@ def test_envelope_duplicate_atomic_and_reprint_without_fetch(q, monkeypatch):
 def test_python38_syntax_and_stdlib():
     import ast
     tree = ast.parse(SCRIPT.read_text(encoding='utf-8'), feature_version=(3, 8))
-    allowed = {'argparse', 'contextlib', 'datetime', 'glob', 'hashlib', 'json', 'math', 'os', 'pathlib', 're',
-               'shlex', 'shutil', 'stat', 'subprocess', 'sys', 'fcntl', 'msvcrt', 'time', 'tempfile'}
+    allowed = {'argparse', 'contextlib', 'copy', 'datetime', 'fcntl', 'functools', 'glob', 'hashlib',
+               'json', 'math', 'msvcrt', 'os', 'pathlib', 're', 'shlex', 'shutil', 'stat',
+               'subprocess', 'sys', 'tempfile', 'threading', 'time'}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             assert all(n.name.split('.')[0] in allowed for n in node.names)
@@ -1124,6 +1288,64 @@ def test_append_checked_refuses_a_concurrent_task_id_case_collision(q):
     with pytest.raises(SystemExit, match='ledger changed during query'):
         q.xq.append_checked(q.repo, [event], stamp)
     assert set(q.xq.state(q.repo)) == {'A'}
+
+
+def test_snapshot_conflict_baseline_is_independent_of_task_data(q):
+    q.assign('local')
+    delivery = dict(event='finish', id='local', status='failed', tests=[{'result': 'recorded'}])
+    q.xq.append(q.repo, delivery)
+    known, stamp = q.xq.snapshot(q.repo)
+    known['local']['tests'][0]['result'] = 'caller edit'
+    q.assign('unrelated')
+    verification = dict(event='verify', id='local', verdict='fixes')
+    q.xq.append_checked(q.repo, [verification], stamp)
+    task = q.xq.state(q.repo)['local']
+    assert task['tests'] == delivery['tests']
+    assert task['verdict'] == 'fixes'
+
+
+def test_direct_assign_keeps_checks_inside_transaction(q, monkeypatch):
+    roots = []
+    read_events = q.xq.events
+
+    def tracked_root():
+        roots.append(q.repo)
+        return q.repo
+
+    def locked_events(root):
+        assert str(root) in q.xq._LOCKED
+        return read_events(root)
+
+    monkeypatch.setattr(q.xq, 'repo_root', tracked_root)
+    monkeypatch.setattr(q.xq, 'events', locked_events)
+    args = SimpleNamespace(id='local', executor='codex', brief=q.brief, note=None,
+                           job=None, worktree=None, queued=True, force=False)
+    assert q.xq.cmd_assign(args) == 0
+    assert roots == [q.repo]
+    assert not q.xq._LOCKED
+    assert read_events(q.repo)[0]['id'] == 'local'
+
+
+def test_replay_observations_are_separate_from_the_task_lifecycle(q):
+    assigned = dict(event='assign', id='local', executor='codex', ts='2026-11-24T14:00:00Z')
+    running = dict(source='codex', state='running', observed_at='2026-11-24T14:01:00Z')
+    unavailable = dict(source='codex', state='unknown', observed_at='2026-11-24T14:02:00Z')
+    heartbeat = dict(event='seen', id='local', ts=running['observed_at'], observation=running)
+    observed = dict(event='observe', id='local', status='failed', observation=unavailable)
+    rows = [assigned, heartbeat, observed, heartbeat]
+    tasks = q.xq.replay_events(rows)
+    assert tasks['local']['observation'] == unavailable
+    assert tasks['local']['seen'] == running['observed_at']
+    assert tasks['local']['status'] == 'running'
+
+    ack = dict(event='seen', id='local', ts='2026-11-24T14:03:00Z', ack_until='2026-11-24T16:00:00Z')
+    assert q.xq.replay_events([*rows, ack])['local']['observation'] == unavailable
+    terminal = dict(source='codex', state='completed', observed_at='2026-11-24T14:04:00Z')
+    finish_event = dict(event='finish', id='local', status='done', observation=terminal)
+    assert q.xq.replay_events([*rows, finish_event])['local']['observation'] == terminal
+    assert 'observation' not in q.xq.replay_events([*rows, finish_event, assigned])['local']
+    manual_finish = dict(event='finish', id='local', status='failed')
+    assert 'observation' not in q.xq.replay_events([*rows, manual_finish])['local']
 
 
 @pytest.mark.parametrize('verdict', ['fixes', 'reject'])
@@ -2293,6 +2515,50 @@ def test_agy_sync_refuses_nonregular_results(q, capsys):
     assert q.xq.state(q.repo)['local']['status'] == 'running'
 
 
+@pytest.mark.parametrize('artifact,observation,status,rc', [
+    (None, 'unknown', 'running', 0),
+    ('queue/selected.job', 'unknown', 'running', 0),
+    ('queue/done/selected.job', 'unavailable', 'running', 1),
+    ('results/selected.md', 'done', 'done', 0),
+])
+def test_agy_sync_selected_registered_task(q, capsys, artifact, observation, status, rc):
+    q.assign('selected', 'agy')
+    q.assign('other', 'agy')
+    bridge = q.repo / '.agy-bridge'
+    results = bridge / 'results'
+    results.mkdir(parents=True)
+    result_text = 'exit_code: 0\n## Answer\nReview'
+    (results / 'other.md').write_text(result_text, encoding='utf-8')
+    if artifact:
+        path = bridge / artifact
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(result_text if path.suffix == '.md' else '{"name":"selected"}', encoding='utf-8')
+    before = q.xq.events(q.repo)
+
+    assert q.xq.sync_agy(q.repo, task_id='selected') == rc
+
+    rows = q.xq.events(q.repo)[len(before):]
+    assert len(rows) == 1 and rows[0]['id'] == 'selected'
+    assert rows[0]['event'] == ('finish' if status == 'done' else 'observe')
+    record = rows[0]['observation']
+    assert record['source'] == 'agy' and record['state'] == observation
+    assert record['observed_at'].endswith('Z')
+    if observation == 'unknown':
+        assert ('pending bridge artifact exists' if artifact else 'no bridge artifact found') in capsys.readouterr().out
+    states = q.xq.state(q.repo)
+    assert states['other']['status'] == 'running' and 'observation' not in states['other']
+    assert states['selected']['status'] == status and 'seen' not in states['selected']
+    assert states['selected']['observation'] == record
+
+
+def test_agy_sync_selected_wrong_executor_leaves_ledger_untouched(q):
+    q.assign('local', 'codex')
+    before = q.xq.events(q.repo)
+    with pytest.raises(SystemExit, match='no registered agy task'):
+        q.xq.sync_agy(q.repo, task_id='local')
+    assert q.xq.events(q.repo) == before
+
+
 def test_cloud_envelope_is_only_printed_after_recording(q, monkeypatch, capsys):
     def refuse(*args):
         q.xq.fail('ledger changed during query')
@@ -2589,3 +2855,25 @@ def test_cloud_changed_diagnostic_only_prints_valid_status_values(q, capsys):
     output = capsys.readouterr().out
     assert 'CHANGED a: done -> ?' in output
     assert 'fixture status' not in output
+
+
+def test_cloud_collection_plans_without_a_ledger_write_and_records_local_observation(q, monkeypatch):
+    assert q.envelope('a') == 0
+    reports = council_publish(q, {'a': {}})
+    observed_at = '2026-11-09T01:00:00Z'
+    monkeypatch.setattr(q.xq, 'now', lambda: observed_at)
+    tasks, _ = q.xq.snapshot(q.repo)
+    before = q.xq.events(q.repo)
+    accepted, relevant, bad, branches, fetch_failed = q.xq.collect_cloud_reports(
+        q.repo, tasks, branch='claude/test', discover=False, batch=None, main=None, emit=lambda _: None)
+    assert (relevant, bad, branches, fetch_failed) == (('a',), {}, ['claude/test'], False)
+    observation = {'source': 'cloud', 'state': 'done', 'observed_at': observed_at}
+    assert accepted[0]['observation'] == observation
+    assert accepted[0]['report']['utc'] == reports['a']['utc']
+    assert tasks['a']['status'] == 'running'
+    assert q.xq.events(q.repo) == before
+    assert q.collect() == 0
+    after = q.xq.events(q.repo)
+    assert after[-1]['observation'] == observation
+    assert q.collect() == 0
+    assert q.xq.events(q.repo) == after

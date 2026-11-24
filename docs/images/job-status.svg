@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="416" viewBox="0 0 880 416"
+     role="img" aria-labelledby="status-title status-description" xml:lang="en">
+  <title id="status-title">Read status or refresh evidence</title>
+  <desc id="status-description">The status command reads the local project ledger. Authorized refresh commands update that ledger from recorded Codex jobs, local agy artifacts, or reports published to a web session's Git branch. Run status again to see the updated record.</desc>
+
+  <rect x="1" y="1" width="878" height="414" rx="23" fill="#F3F6FB" stroke="#D6DFED" stroke-width="2"/>
+  <g fill="#FFFFFF" stroke="#D6DFED" stroke-width="1.5" aria-hidden="true">
+    <rect x="40" y="90" width="387" height="176" rx="16"/>
+    <rect x="453" y="90" width="387" height="176" rx="16"/>
+    <rect x="40" y="308" width="800" height="73" rx="16"/>
+  </g>
+  <g fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M232 302v-30m-5 5 5-5 5 5" stroke="#245BD6"/>
+    <path d="M647 272v30m-5-5 5 5 5-5" stroke="#096B5E"/>
+  </g>
+
+  <g font-family="'Segoe UI', Arial, sans-serif">
+    <text x="40" y="57" fill="#142438" font-size="32" font-weight="700">Read status or refresh evidence</text>
+    <g font-size="21" font-weight="700">
+      <text x="64" y="128" fill="#245BD6">Read recorded status</text>
+      <text x="477" y="128" fill="#096B5E">Refresh with authorization</text>
+      <text x="64" y="339" fill="#142438">Shared project ledger</text>
+    </g>
+    <g font-size="17" fill="#435570">
+      <text x="64" y="167"><tspan fill="#245BD6" font-weight="700">status</tspan> reads saved task state.</text>
+      <text x="64" y="195">Filter by ID, executor, or state.</text>
+      <text x="64" y="223">Use <tspan fill="#245BD6" font-weight="700">--json</tspan> for scripts.</text>
+      <text x="477" y="167"><tspan fill="#096B5E" font-weight="700">poll</tspan> checks selected Codex or agy tasks.</text>
+      <text x="477" y="195"><tspan fill="#096B5E" font-weight="700">agy-sync</tspan> imports local bridge artifacts.</text>
+      <text x="477" y="223"><tspan fill="#096B5E" font-weight="700">cloud-collect</tspan> fetches published reports.</text>
+      <text x="64" y="363">Git worktrees share the main checkout’s recorded state.</text>
+    </g>
+  </g>
+</svg>

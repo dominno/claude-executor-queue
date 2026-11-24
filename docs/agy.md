@@ -1,6 +1,7 @@
 # agy review recipes
 
 Run `xq.py init`, then `xq.py doctor --need agy`. The bridge requires Python 3.9+ on macOS or Linux.
+Use `xq.py poll --id <id>` to refresh one registered review from local artifacts. [Status and refresh commands](job-status.md)
 `doctor --need agy` runs the installed bridge's diagnostics, including its network check for model access.
 Use `xq.py doctor --need agy --offline` for local checks. A successful offline check confirms local setup
 while sign-in and model access remain unverified.

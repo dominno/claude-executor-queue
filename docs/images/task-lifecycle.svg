@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566" role="img" aria-labelledby="lifecycle-title lifecycle-desc" xml:lang="en">
   <title id="lifecycle-title">From request to reviewed result</title>
-  <desc id="lifecycle-desc">Authorize the task scope and write a brief. Start the selected executor separately and record its assignment in the required order. Queued work awaits dispatch. Import or record the actual outcome. Review the delivery independently, record verification, and integrate code only with authorization.</desc>
+  <desc id="lifecycle-desc">Authorize the task scope and write a brief. Start the selected executor separately and record its assignment in the required order. Queued work awaits dispatch. Read recorded progress with status, then explicitly import or record the actual outcome. Review the delivery independently, record verification, and integrate code only with authorization.</desc>
 
   <rect x="1" y="1" width="878" height="564" rx="23" fill="#F3F6FB" stroke="#D6DFED" stroke-width="2"/>
 
@@ -53,8 +53,8 @@
       <text x="137" y="263">Start the executor separately and follow its assignment order.</text>
       <text x="137" y="285"><tspan fill="#245BD6" font-weight="700">Queued</tspan> means the task is waiting for dispatch.</text>
 
-      <text x="137" y="375">Import the result with <tspan fill="#096B5E" font-weight="700">poll</tspan>, <tspan fill="#096B5E" font-weight="700">agy-sync</tspan>, or <tspan fill="#096B5E" font-weight="700">cloud-collect</tspan>.</text>
-      <text x="137" y="397">Use <tspan fill="#096B5E" font-weight="700">finish</tspan> to record a result manually.</text>
+      <text x="137" y="375">Read recorded progress with <tspan fill="#096B5E" font-weight="700">status</tspan>.</text>
+      <text x="137" y="397">Refresh with <tspan fill="#096B5E" font-weight="700">poll</tspan>, <tspan fill="#096B5E" font-weight="700">agy-sync</tspan>, or <tspan fill="#096B5E" font-weight="700">cloud-collect</tspan>. Record manually with <tspan fill="#096B5E" font-weight="700">finish</tspan>.</text>
 
       <text x="137" y="487">Inspect the delivery and record the verdict with <tspan fill="#613E9B" font-weight="700">verify</tspan>.</text>
       <text x="137" y="509"><tspan fill="#613E9B" font-weight="700">Optional integration</tspan> requires user authorization.</text>
