@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 
-VERSION = '3.3.0'
+VERSION = '3.4.0'
 REPORT_MAX_BYTES = 65536
 REPORT_MAX_TEXT = 2000
 REPORT_MAX_TESTS = 100
@@ -122,15 +122,29 @@ def ledger_stamp(root):
 
 def snapshot(root):
     with ledger_lock(root):
-        return state(root), ledger_stamp(root)
+        tasks = state(root)
+        return tasks, (ledger_stamp(root), tasks)
 
 
-def append_checked(root, rows, stamp):
-    # External queries never hold the ledger lock. Refuse stale results if a
-    # concurrent writer changed the snapshot instead of overwriting new work.
+def append_checked(root, rows, stamp, *, dependencies=None):
+    """Commit external query results if their ledger inputs still match."""
+    rows = list(rows)
+    if not rows:
+        return
+    previous_stamp, previous = stamp
     with ledger_lock(root):
-        if ledger_stamp(root) != stamp:
-            fail('ledger changed during query; retry to reconcile fresh state')
+        if ledger_stamp(root) != previous_stamp:
+            current = state(root)
+            touched = {row['id'].casefold() for row in rows}
+
+            def affected(tasks):
+                # Heartbeats update liveness without changing the queried attempt.
+                return {tid: {key: value for key, value in task.items() if key not in ('seen', 'ack_until')}
+                        for tid, task in tasks.items() if tid.casefold() in touched}
+
+            if (affected(previous) != affected(current) or
+                    (dependencies is not None and dependencies(previous) != dependencies(current))):
+                fail('ledger changed during query; retry to reconcile fresh state')
         append_many(root, rows)
 
 
@@ -177,9 +191,12 @@ def ledger_lock(root):
 
 
 def append_many(root, rows):
-    rows = list(rows)
+    rows = [dict(ts=now(), **row) if 'ts' not in row else row for row in rows]
     if not rows:
         return
+    # A torn append cannot leave a valid prefix of individual events from a batch.
+    value = rows[0] if len(rows) == 1 else {'event': 'batch', 'events': rows}
+    encoded = (json.dumps(value, ensure_ascii=False) + '\n').encode('utf-8')
     with ledger_lock(root):
         path = ledger_path(root)
         with safe_open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND) as fh:
@@ -189,8 +206,7 @@ def append_many(root, rows):
                 fh.seek(-1, 2)
                 if fh.read(1) != b'\n':
                     fh.write(b'\n')
-            fh.write(''.join(json.dumps(dict(ts=now(), **e), ensure_ascii=False) + '\n'
-                             if 'ts' not in e else json.dumps(e, ensure_ascii=False) + '\n' for e in rows).encode('utf-8'))
+            fh.write(encoded)
             fh.flush()
             os.fsync(fh.fileno())
 
@@ -210,9 +226,16 @@ def events(root):
             continue
         try:
             value = json.loads(line)
-            if not isinstance(value, dict) or not isinstance(value.get('id'), str) or not value['id']:
+            if isinstance(value, dict) and value.get('event') == 'batch' and 'id' not in value:
+                records = value.get('events')
+                if not isinstance(records, list) or len(records) < 2:
+                    raise ValueError('expected a batch with at least two events')
+            else:
+                records = [value]
+            if any(not isinstance(record, dict) or not isinstance(record.get('id'), str) or not record['id']
+                   for record in records):
                 raise ValueError('expected object with id')
-            rows.append(value)
+            rows.extend(records)
         except (ValueError, RecursionError):
             print('xq: corrupt ledger line {} ignored'.format(number), file=sys.stderr)
     return rows
@@ -228,14 +251,24 @@ def state(root):
             # New attempt carries no previous verdict, finish, job, base or merge.
             tasks[tid] = dict(e, attempt=attempt, assigned=e.get('ts', ''),
                               status='queued' if e.get('queued') else 'running')
+            if e.get('executor') == 'cloud':
+                tasks[tid].setdefault('batch_branch', e.get('branch'))
         elif kind in ('finish', 'verify', 'merge', 'seen', 'close'):
             t = tasks.setdefault(tid, {'id': tid})
             if kind == 'verify' and t.get('status') in ('running', 'queued'):
                 continue  # Forced early audit events never approve a delivery.
             if kind == 'finish':
-                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'closed', 'reason', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'tests'):
+                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256', 'delegate_exit', 'result', 'head', 'tests'):
                     t.pop(key, None)
-            t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id')})
+                if not e.get('preserve_closed'):
+                    # Historical forced finishes reopened the task.
+                    t.pop('closed', None)
+                    t.pop('reason', None)
+            if kind == 'verify' and t.get('merged') and (
+                    e.get('verdict') != 'pass' or e.get('verified_head') != t.get('verified_head')):
+                t.pop('merged', None)
+                t.pop('commit', None)
+            t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id', 'preserve_closed')})
             if kind == 'finish':
                 t['finished'] = e.get('ts', '')
             elif kind == 'seen':
@@ -371,10 +404,13 @@ def preflight_status(root, tasks, data):
         reasons.append('live process readings unavailable: ' + str(exc))
     per_executor = {}
     for executor, default in (('codex', 2), ('agy', 1)):
-        ledger = sum(t.get('executor') == executor and t.get('status') == 'running' for t in tasks)
-        count = max(ledger, live[executor])
+        running = [t for t in tasks if t.get('executor') == executor and t.get('status') == 'running']
+        closed = sum(bool(t.get('closed')) for t in running)
+        count = max(len(running), live[executor])
         limit = data.get('limits', {}).get(executor, default)
-        detail = '{} running {}/{} (ledger {}, live {})'.format(executor, count, limit, ledger, live[executor])
+        closed_detail = ', {} closed awaiting terminal evidence'.format(closed) if closed else ''
+        detail = '{} running {}/{} (ledger {}, live {}{})'.format(
+            executor, count, limit, len(running), live[executor], closed_detail)
         details.append(detail)
         per_executor[executor] = reasons + ([detail] if count >= limit else [])
     return per_executor, details
@@ -498,8 +534,11 @@ def require_task(root, a, allowed, action):
 
 def cmd_finish(a):
     root = repo_root()
-    require_task(root, a, ('running', 'queued'), 'finish')
-    append(root, dict(event='finish', id=a.id, status=a.status, summary=(a.summary or '')[:2000], force=a.force))
+    task = require_task(root, a, ('running', 'queued'), 'finish')
+    event = dict(event='finish', id=a.id, status=a.status, summary=(a.summary or '')[:2000], force=a.force)
+    if task.get('closed'):
+        event['preserve_closed'] = True
+    append(root, event)
     return 0
 
 
@@ -512,6 +551,8 @@ def resolve_commit(root, ref):
 def cmd_verify(a):
     root = repo_root()
     t = require_task(root, a, ('done', 'failed', 'blocked'), 'verify finished')
+    if t.get('merged') and not a.force:
+        fail(a.id + ' is already merged; use --force only for explicit reconciliation')
     reader, evidence = a.by.strip(), a.evidence.strip()
     if not reader or not evidence:
         fail('--by and --evidence must be nonempty')
@@ -598,15 +639,23 @@ def positive_hours(value):
     return hours
 
 
+def acknowledgement_hours(value):
+    hours = positive_hours(value)
+    if hours > 8760:
+        raise argparse.ArgumentTypeError('must be at most 8760 hours')
+    return hours
+
+
 def cmd_status(a):
     rows = list(state(repo_root()).values())
     if a.open:
         rows = [t for t in rows if not t.get('closed') and (t.get('status') in ('running', 'queued') or
                 t.get('verdict') != 'pass' or (t.get('executor') in ('codex', 'cloud') and not t.get('merged')))]
     for t in rows:
-        print('{:<32} {:<6} {:<8} {:<7} {:<14} {}{}'.format(
+        print('{:<32} {:<6} {:<8} {:<7} {:<14} {}{}{}'.format(
             t['id'], t.get('executor') or '-', t.get('status') or '-', t.get('verdict') or '-',
-            t.get('by') or '-', t.get('merged') or '-', ' STALE' if stale(t, a.stale_hours) else ''))
+            t.get('by') or '-', t.get('merged') or '-', ' STALE' if stale(t, a.stale_hours) else '',
+            ' CLOSED' if t.get('closed') else ''))
     if not rows:
         print('no tasks')
     return 0
@@ -708,26 +757,46 @@ def plugin_binary(kind):
     installed = home / 'installed_plugins.json'
     try:
         data = json.loads(installed.read_text(encoding='utf-8')).get('plugins', {})
-    except (OSError, ValueError, AttributeError, TypeError):
-        data = {}
-    for marketplace in marketplaces:
-        entries = data.get(kind + '@' + marketplace, []) if isinstance(data, dict) else []
-        if isinstance(entries, dict):
-            entries = [entries]
-        if isinstance(entries, list):
-            candidates = []
-            for entry in entries:
-                install_path = entry.get('installPath') if isinstance(entry, dict) else None
-                if isinstance(install_path, str) and Path(install_path).is_absolute():
-                    candidate = Path(install_path) / relative
-                    if candidate.is_file():
-                        candidates.append(candidate)
+    except FileNotFoundError:
+        # Older installs may only have a cache. A present registry takes
+        # precedence so a project cannot pick an unrelated cached install.
+        for marketplace in marketplaces:
+            cache = home / 'cache' / marketplace / kind
+            candidates = [path for path in cache.glob('*/' + relative) if path.is_file()]
             if candidates:
                 return str(max(candidates, key=version_key))
-        cache = home / 'cache' / marketplace / kind
-        candidates = [path for path in cache.glob('*/' + relative) if path.is_file()]
+        return None
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    project = os.environ.get('XQ_ROOT') or git('rev-parse', '--show-toplevel', check=False).strip()
+    worktree = Path(project).expanduser().resolve() if project else None
+    priority = {None: 0, 'user': 0, 'managed': 0, 'project': 1, 'local': 2}
+    for marketplace in marketplaces:
+        entries = data.get(kind + '@' + marketplace, [])
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            continue
+        candidates = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            scope, install_path = entry.get('scope'), entry.get('installPath')
+            if ((scope is not None and not isinstance(scope, str)) or scope not in priority or
+                    not isinstance(install_path, str) or not Path(install_path).is_absolute()):
+                continue
+            if scope in ('project', 'local'):
+                registered_project = entry.get('projectPath')
+                if (worktree is None or not isinstance(registered_project, str) or
+                        not Path(registered_project).is_absolute() or Path(registered_project).resolve() != worktree):
+                    continue
+            candidate = Path(install_path) / relative
+            if candidate.is_file():
+                candidates.append((priority[scope], version_key(candidate), str(candidate)))
         if candidates:
-            return str(max(candidates, key=version_key))
+            return max(candidates)[2]
     return None
 
 
@@ -811,17 +880,20 @@ def doctor(a):
     if 'agy' in needed:
         if WINDOWS:
             check('agy platform', False, 'agy-bridge supports macOS and Linux; run the bridge in a supported environment')
-        agy = shutil.which('agy')
-        check('agy CLI', agy, 'https://antigravity.google/docs/cli-using; agy --version; interactive first run logs in; agy models (no unofficial pip scripts)')
-        r = run([agy or 'agy', 'models'])
-        check('agy auth/models', r.returncode == 0, 'agy models; bridge exit 11 = not logged in')
-        agyb = plugin_binary('agy')
-        check('agy-bridge plugin', agyb, agyb or '/plugin marketplace add https://github.com/dominno/claude-agy-bridge; /plugin install agy@agy-bridge')
-        if agyb:
-            print(shell_assignment('AGYB', agyb))
-            for feature in ('queue', 'verdict'):
-                check('agy-bridge ' + feature, run(bridge_command(agyb) + [feature, '--help']).returncode == 0,
-                      '/plugin update agy@agy-bridge or use only /agy:delegate; version labels alone do not establish support')
+        else:
+            agyb = plugin_binary('agy')
+            check('agy-bridge plugin', agyb, agyb or '/plugin marketplace add https://github.com/dominno/claude-agy-bridge; /plugin install agy@agy-bridge')
+            if agyb:
+                print(shell_assignment('AGYB', agyb))
+                command = bridge_command(agyb)
+                probe = run(command + ['doctor', '--repo', str(root)], timeout=60)
+                check('agy-bridge doctor', probe.returncode == 0,
+                      'checks Python, CLI version and model access in the bridge environment; see /agy:doctor')
+                if probe.stdout.strip():
+                    print(probe.stdout.rstrip())
+                for feature in ('queue', 'verdict'):
+                    check('agy-bridge ' + feature, run(command + [feature, '--help']).returncode == 0,
+                          '/plugin update agy@agy-bridge or use only /agy:delegate; version labels alone do not establish support')
         ignored = run(['git', 'check-ignore', '-q', '.agy-bridge/probe'], cwd=root).returncode == 0
         tracked = bool(git('ls-files', '--', '.agy-bridge', check=False, cwd=root).strip())
         check('.agy-bridge ignored', ignored and not tracked, 'run xq init; remove tracked output before any push')
@@ -842,6 +914,9 @@ def doctor(a):
 
 
 AGY_HEADER_MAX_BYTES = 65536
+# The bridge itself reads at most 8 MiB for queue result recovery. Archived
+# queue results can repeat hundreds of file paths per attempt before the answer.
+AGY_QUEUE_HEADER_MAX_BYTES = 8 * 1024 * 1024
 AGY_ANSWER_HEADING = re.compile(r'^## (?:Round [0-9]+|Answer)[ \t]*(?:\n|\Z)', re.M)
 
 
@@ -856,16 +931,17 @@ def agy_artifact_exists(path):
         return False
 
 
-def read_agy_header(path, require_complete=True):
+def read_agy_header(path, require_complete=True, archived=False):
     if not agy_artifact_exists(path):
         return None
     flags = os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+    limit = AGY_QUEUE_HEADER_MAX_BYTES if archived else AGY_HEADER_MAX_BYTES
     with safe_open(path, flags, 'rb') as stream:
         if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
             raise ValueError('bridge artifact must be a regular file')
-        head = stream.read(AGY_HEADER_MAX_BYTES + 1)
-    truncated = len(head) > AGY_HEADER_MAX_BYTES
-    text = head[:AGY_HEADER_MAX_BYTES].decode('utf-8', errors='replace')
+        head = stream.read(limit + 1)
+    truncated = len(head) > limit
+    text = head[:limit].decode('utf-8', errors='replace')
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     if truncated:
         # An incomplete line cannot establish an answer boundary.
@@ -874,7 +950,7 @@ def read_agy_header(path, require_complete=True):
     if heading:
         return text[:heading.start()]
     if truncated and require_complete:
-        raise ValueError('bridge header exceeds {} bytes without an answer heading'.format(AGY_HEADER_MAX_BYTES))
+        raise ValueError('bridge header exceeds {} bytes without an answer heading'.format(limit))
     return text
 
 
@@ -920,8 +996,11 @@ def cmd_agy_sync(a):
     for tid, t in known.items():
         if explicit and tid == match.group(1):
             continue
-        if t.get('executor') != 'agy' or t.get('status') not in ('running', 'queued') or t.get('closed'):
+        if t.get('executor') != 'agy' or t.get('status') not in ('running', 'queued'):
             continue
+        if t.get('closed') and t.get('status') != 'running':
+            continue
+        closure = {'preserve_closed': True} if t.get('closed') else {}
         valid_id(tid)
         folder = root / '.agy-bridge'
         result = folder / 'results' / (tid + '.md')
@@ -932,15 +1011,21 @@ def cmd_agy_sync(a):
                 continue
             failed = agy_artifact_exists(queue / 'failed' / job_file)
             done = agy_artifact_exists(queue / 'done' / job_file)
-            header = read_agy_header(result)
+            if failed:
+                row = dict(event='finish', id=tid, status='failed', **closure)
+                if agy_artifact_exists(result):
+                    row.update(summary='agy failed archive; inspect result locally', result=str(result))
+                else:
+                    row.update(summary='agy failed archive; no result, inspect locally')
+                rows.append(row)
+                continue
+            header = read_agy_header(result, archived=done)
         except (OSError, ValueError) as exc:
             print('PROBLEM {}: cannot read bridge artifacts: {}'.format(tid, exc))
             problem = True
             continue
         if header is None:
-            if failed:
-                rows.append(dict(event='finish', id=tid, status='failed', summary='agy failed archive; no result, inspect locally'))
-            elif done:
+            if done:
                 print('PROBLEM {}: done archive has no result'.format(tid))
                 problem = True
             continue
@@ -955,9 +1040,9 @@ def cmd_agy_sync(a):
             print('PROBLEM {}: missing bridge exit header; inspect result manually'.format(tid))
             problem = True
             continue
-        rejected = failed or omitted or unsafe_attempt or any(code.strip('0') for code in codes)
+        rejected = omitted or unsafe_attempt or any(code.strip('0') for code in codes)
         rows.append(dict(event='finish', id=tid, status='failed' if rejected else 'done',
-                         summary='Unverified agy result: ' + str(result), result=str(result)))
+                         summary='Unverified agy result: ' + str(result), result=str(result), **closure))
     append_checked(root, rows, stamp)
     return 1 if problem else 0
 
@@ -969,9 +1054,12 @@ def cmd_poll(a):
     rows = []
     known, stamp = snapshot(root)
     for tid, t in known.items():
-        if t.get('executor') != 'codex' or t.get('status') != 'running' or t.get('closed'):
+        if t.get('executor') != 'codex' or t.get('status') != 'running':
             continue
+        closed = t.get('closed')
         if not cc or not t.get('job') or not t.get('worktree'):
+            if closed:
+                continue  # The slot remains occupied until terminal evidence is available.
             print('PROBLEM {}: missing companion/job/worktree; reconcile manually'.format(tid))
             problem = True
             continue
@@ -988,15 +1076,20 @@ def cmd_poll(a):
             continue
         if status in ('running', 'queued'):
             print('{}: {}'.format(tid, status))
-            rows.append(dict(event='seen', id=tid))
+            if not closed:
+                rows.append(dict(event='seen', id=tid))
+            continue
+        terminal = 'done' if status in ('completed', 'done') else 'failed'
+        if closed:
+            rows.append(dict(event='finish', id=tid, status=terminal, preserve_closed=True,
+                             summary='Closed Codex job reported ' + status))
             continue
         result = run(args + ['result', t['job'], '--cwd', t['worktree']])
         if result.returncode:
             print('PROBLEM {}: result unavailable; reconcile manually'.format(tid))
             problem = True
             continue
-        rows.append(dict(event='finish', id=tid, status='done' if status in ('completed', 'done') else 'failed',
-                         summary=result.stdout.strip()[:2000]))
+        rows.append(dict(event='finish', id=tid, status=terminal, summary=result.stdout.strip()[:2000]))
     append_checked(root, rows, stamp)
     return max(1 if problem else 0, cmd_agy_sync(a))
 
@@ -1046,10 +1139,13 @@ def envelope_text(ids, brief, base, main, branch):
    {{"task":"<id>","status":"done|failed|blocked","summary":"...","tests":[{{"cmd":"...","result":"..."}}],
     "head":"<implementation commit>","base":"{base}","utc":"<ISO UTC timestamp>","branch":"<actual session branch>"}}.
    Failed/blocked tasks change only their own status file; head is the parent commit. Commit each status.
-   Use git push origin HEAD only if the user authorized this batch to publish to that session branch on
-   the configured origin. If authorization or destination cannot be confirmed, stop and report blocked.
+   Publish only if the user authorized this batch, the exact origin push URL and the session branch.
+   Confirm `git remote get-url --push --all origin` resolves to just that URL without exposing credentials.
+   Set session_branch to the approved current claude/ branch (and match the pinned branch if specified).
+   Stop if origin is configured as a mirror or if the approval, URL or branch cannot be confirmed.
    Before pushing, inspect all outgoing commits, paths, blob sizes and credential matches. Report a problem
    without exposing credential text. Stop rather than publishing sensitive or out-of-scope files.
+   Push only the confirmed ref: git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch".
    Continue in order after individual failed/blocked tasks. Stop if an authorized push fails twice.
 4) Limit network access to authorized Git operations on that origin. Keep credentials and secrets out of
    task input, output and the execution environment outside Git's authorized transport. Report blocked if a task needs
@@ -1066,9 +1162,30 @@ def cmd_cloud_envelope(a):
         valid_id(tid)
     if len(set(ids)) != len(ids):
         fail('task ids must be distinct')
-    main = a.main if a.reprint else require_main(root, a.main)
-    if main:
-        valid_branch(main, root)
+    if len({tid.casefold() for tid in ids}) != len(ids):
+        fail('task id case collision')
+    if a.reprint:
+        with ledger_lock(root):
+            recorded = {row['id']: row for row in events(root)
+                        if row.get('event') == 'assign' and row.get('executor') == 'cloud'}
+        if any(tid not in recorded for tid in ids):
+            fail('--reprint requires previously assigned cloud tasks')
+        records = [recorded[tid] for tid in ids]
+        if any(not t.get('base') or not t.get('brief') for t in records):
+            fail('--reprint requires a recorded envelope with a pinned base and brief')
+        first = records[0]
+        if any(cloud_batch_key(t) != cloud_batch_key(first) for t in records):
+            fail('--reprint tasks must belong to the same envelope')
+        main = first.get('main') or require_main(root, a.main)
+        if first.get('batch_id'):
+            # Keep the order and destination from the original handoff, even
+            # when the caller selects a single task or a report bound a branch.
+            ids = [tid for tid, row in recorded.items() if row.get('batch_id') == first['batch_id']]
+        print(envelope_text(ids, first['brief'], first['base'], main, first.get('branch')))
+        return 0
+    if not a.brief:
+        fail('cloud-envelope requires --brief unless --reprint was supplied')
+    main = require_main(root, a.main)
     if a.branch:
         valid_branch(a.branch, root)
         if a.branch == main:
@@ -1083,23 +1200,6 @@ def cmd_cloud_envelope(a):
     known, stamp = snapshot(root)
     for tid in ids:
         check_id_collision(tid, known)
-    if len({tid.casefold() for tid in ids}) != len(ids):
-        fail('task id case collision')
-    if a.reprint:
-        records = [known.get(tid, {}) for tid in ids]
-        if any(t.get('executor') != 'cloud' for t in records):
-            fail('--reprint requires previously assigned cloud tasks')
-        if any(not t.get('base') or not t.get('brief') for t in records):
-            fail('--reprint requires a recorded envelope with a pinned base and brief')
-        first = records[0]
-        if any(t.get(k) != first.get(k) for t in records for k in ('base', 'brief', 'branch', 'batch')):
-            fail('--reprint tasks must belong to the same envelope')
-        base = first['base']
-        brief = first['brief']
-        main = first.get('main') or require_main(root, a.main)
-        branch = first.get('branch')
-        print(envelope_text(ids, brief, base, main, branch))
-        return 0
     for tid in ids:
         if tid in known:
             fail('{} already {}; use a new id'.format(tid, known[tid].get('status', 'recorded')))
@@ -1114,8 +1214,10 @@ def cmd_cloud_envelope(a):
         if not re.search(r'^## ' + re.escape(tid) + r'\s*$', text, re.M):
             fail('pushed brief lacks ## ' + tid)
     output = envelope_text(ids, brief, base, main, a.branch)
+    # Task IDs are unique across the ledger, so the first ID uniquely names
+    # this handoff even when multiple envelopes use the same brief.
     append_checked(root, [dict(event='assign', id=tid, executor='cloud', brief=brief, branch=a.branch,
-                            base=base, main=main, batch=Path(brief).stem) for tid in ids], stamp)
+                            base=base, main=main, batch=Path(brief).stem, batch_id=ids[0]) for tid in ids], stamp)
     print(output, flush=True)
     print('recorded {} assign events; paste as /goal'.format(len(ids)), file=sys.stderr)
     return 0
@@ -1123,6 +1225,15 @@ def cmd_cloud_envelope(a):
 
 def ancestor(before, after, root):
     return run(['git', 'merge-base', '--is-ancestor', before, after], cwd=root).returncode == 0
+
+
+def cloud_batch_key(task):
+    if task.get('batch_id'):
+        return ('envelope', task['batch_id'])
+    if task.get('batch'):
+        return ('legacy', *(task.get(key) for key in ('batch', 'brief', 'base', 'main')),
+                task.get('batch_branch', task.get('branch')))
+    return ('task', task.get('id'))
 
 
 def report_hash(data):
@@ -1134,6 +1245,18 @@ def clean_report(data):
     result = {k: data[k] for k in ('task', 'status', 'summary', 'tests', 'head', 'base', 'utc', 'branch')}
     result['tests'] = [{k: row[k] for k in ('cmd', 'result')} for row in data['tests']]
     return result
+
+
+def cloud_commit(root, value):
+    if isinstance(value, str) and SHA_RE.fullmatch(value):
+        return git('rev-parse', '--verify', value + '^{commit}', check=False, cwd=root).strip() or None
+    return None
+
+
+def recorded_cloud_delivery(task):
+    if task.get('executor') == 'cloud' and task.get('status') == 'done' and task.get('report'):
+        return task.get('head')
+    return None
 
 
 def validate_report(data, tid, t, ref, root, branch):
@@ -1188,12 +1311,17 @@ def validate_report(data, tid, t, ref, root, branch):
             if resolved_head == base or not re.search(r'(?<![\w.-])' + re.escape(tid) + r'(?![\w.-])', message):
                 reasons.append('done requires an implementation commit with this task id')
         main = t.get('main') or require_main(root)
-        main_ref = 'refs/heads/' + main
-        if not git('rev-parse', '--verify', main_ref, check=False, cwd=root).strip():
-            main_ref = 'refs/remotes/origin/' + main
-        fork = git('merge-base', ref, main_ref, check=False, cwd=root).strip()
-        if fork != base:
-            reasons.append('session fork point must equal the pinned base')
+        if base and ancestor(base, head, root):
+            main_ref = 'refs/heads/' + main
+            if not ancestor(base, main_ref, root):
+                main_ref = 'refs/remotes/origin/' + main
+            if not ancestor(base, main_ref, root):
+                # The pinned commit is authoritative when neither local ref
+                # has caught up to the branch fetched during handoff.
+                main_ref = base
+            fork = git('merge-base', ref, main_ref, check=False, cwd=root).strip()
+            if fork != base:
+                reasons.append('session fork point must equal the pinned base')
     return reasons
 
 
@@ -1245,20 +1373,27 @@ def cmd_cloud_collect(a):
             if branch not in branches:
                 branches.append(branch)
     main = require_main(root, a.main) if cloud else None
-    seen, pending, fingerprints, heads = set(), [], {}, {}
+    seen, pending, fingerprints = set(), [], {}
     bad, diffs, warned = {}, {}, set()
+    historical = {}
+    for tid, task in tasks.items():
+        head = recorded_cloud_delivery(task)
+        if head:
+            canonical = head if len(head) == len(task.get('base') or '') else cloud_commit(root, head)
+            if canonical:
+                historical.setdefault(canonical, tid)
 
     def group(tid):
-        return cloud.get(tid, {}).get('batch') or tid
+        return cloud_batch_key(cloud[tid])
 
     def problem(tid, message):
         bad.setdefault(group(tid), []).append(message)
 
-    def warn_changes(t, tid, data, ref):
+    def warn_changes(t, tid, head, ref):
         # Review task implementation separately, and preserve the old safety
         # check for authority changes hidden in status/later commits as well.
-        paths = sensitive_paths(root, t['base'], data['head'], tid, t.get('brief'), diffs)
-        paths += sensitive_paths(root, data['head'], ref, tid, t.get('brief'), diffs)
+        paths = sensitive_paths(root, t['base'], head, tid, t.get('brief'), diffs)
+        paths += sensitive_paths(root, head, ref, tid, t.get('brief'), diffs)
         for path in paths:
             if path not in warned:
                 print('WARN SENSITIVE ' + display_cloud_name(path) + ' (untrusted changes; inspect before tests/merge)')
@@ -1306,9 +1441,13 @@ def cmd_cloud_collect(a):
                     problem(tid, 'CHANGED {}: {} -> {} (report differs; reconcile explicitly)'.format(
                         tid, t.get('status'), data.get('status') if isinstance(data, dict) else '?'))
                 else:
-                    warn_changes(t, tid, data, ref)
+                    head = cloud_commit(root, t.get('head'))
+                    if not head or not ancestor(head, ref, root):
+                        problem(tid, 'CHANGED {}: recorded delivery head is no longer on {}'.format(tid, branch))
+                    else:
+                        warn_changes(t, tid, head, ref)
                 continue
-            reasons = validate_report(data, tid, dict(t, main=a.main or config(root).get('main') or t.get('main') or main), ref, root, branch)
+            reasons = validate_report(data, tid, dict(t, main=a.main or t.get('main') or main), ref, root, branch)
             if reasons:
                 problem(tid, 'PROBLEM {}: {}'.format(tid, '; '.join(reasons)))
                 continue
@@ -1318,46 +1457,78 @@ def cmd_cloud_collect(a):
             except UnicodeEncodeError:
                 problem(tid, 'PROBLEM {}: report fields contain invalid Unicode'.format(tid))
                 continue
+            head = cloud_commit(root, data['head'])
+            if not head:
+                problem(tid, 'PROBLEM {}: cannot resolve delivery head'.format(tid))
+                continue
             if data['status'] == 'done':
-                head = git('rev-parse', '--verify', data['head'] + '^{commit}', cwd=root).strip()
-                peer = heads.get(head)
-                if peer is not None and peer != tid:
-                    problem(peer, 'PROBLEM {}: done heads must be distinct from {}'.format(peer, tid))
-                    problem(tid, 'PROBLEM {}: done heads must be distinct from {}'.format(tid, peer))
+                prior = historical.get(head)
+                if prior is not None and prior != tid:
+                    problem(tid, 'PROBLEM {}: done head is already recorded for {}'.format(tid, prior))
                     continue
-                heads[head] = tid
-            warn_changes(t, tid, data, ref)
+            warn_changes(t, tid, head, ref)
             fingerprint = report_sha256
             if tid in fingerprints:
                 if not t.get('branch') or fingerprints[tid] != fingerprint:
                     problem(tid, 'CHANGED {}: conflicting reports across session branches; unbound reports require one branch'.format(tid))
                 continue
             fingerprints[tid] = fingerprint
-            pending.append(dict(event='finish', id=tid, status=data['status'], summary=data['summary'][:2000],
-                                head=data['head'], tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch))
-    batches = {t.get('batch') for tid, t in cloud.items() if tid in seen or t.get('branch') in branches}
-    batches.discard(None)
-    if a.batch:
-        batches.add(a.batch)
+            pending.append(dict(event='finish', id=tid, status=data['status'], summary=data['summary'],
+                                head=head, tests=data['tests'], report=data, report_sha256=report_sha256, branch=branch))
+    batches = {group(tid) for tid, t in cloud.items() if tid in seen or t.get('branch') in branches}
+    if a.batch and (a.discover or not batches):
+        batches.update(group(tid) for tid in cloud)
     for tid, t in cloud.items():
         if a.branch and t.get('branch') and t['branch'] not in branches and tid not in seen:
             print('UNCOLLECTED {}: bound to {} (not selected)'.format(tid, t['branch']))
-    cloud = {tid: t for tid, t in cloud.items()
-             if tid in seen or t.get('branch') in branches or t.get('batch') in batches or
-             (a.discover and t.get('branch'))}
-    for tid, t in cloud.items():
+    relevant = {tid: t for tid, t in cloud.items()
+                if tid in seen or t.get('branch') in branches or
+                (a.discover and t.get('branch')) or (not t.get('branch') and group(tid) in batches)}
+    for tid, t in relevant.items():
         if tid not in seen and t.get('status') == 'running':
             problem(tid, 'MISSING ' + tid)
+        elif tid not in seen and t.get('report') and t.get('branch') in branches:
+            problem(tid, 'CHANGED {}: recorded report is missing from {}'.format(tid, t['branch']))
     # Atomic per batch: a malformed peer blocks its own batch, not unrelated work.
+    def check_distinct_heads(rows, within_batch):
+        owners = {}
+        for row in rows:
+            tid = row['id']
+            key = (group(tid), row['head']) if within_batch else row['head']
+            peer = owners.setdefault(key, tid)
+            if peer != tid:
+                problem(peer, 'PROBLEM {}: done heads must be distinct from {}'.format(peer, tid))
+                problem(tid, 'PROBLEM {}: done heads must be distinct from {}'.format(tid, peer))
+
+    candidates = [row for row in pending if row['status'] == 'done' and '*' not in bad and group(row['id']) not in bad]
+    check_distinct_heads(candidates, within_batch=True)
+    check_distinct_heads([row for row in candidates if group(row['id']) not in bad], within_batch=False)
     accepted = [row for row in pending if '*' not in bad and group(row['id']) not in bad]
-    append_checked(root, accepted, stamp)
+    accepted_groups = {group(row['id']) for row in accepted}
+    accepted_heads = {row['head'] for row in accepted if row['status'] == 'done'}
+
+    def dependencies(states):
+        relevant_tasks = {}
+        for tid, task in states.items():
+            if task.get('executor') != 'cloud':
+                continue
+            branch = task.get('branch')
+            in_group = cloud_batch_key(task) in accepted_groups and (a.discover or not branch or branch in branches)
+            delivery = recorded_cloud_delivery(task)
+            conflicts = delivery and any(head.startswith(delivery) for head in accepted_heads)
+            if in_group or conflicts:
+                relevant_tasks[tid] = (task.get('status'), branch, task.get('closed'), task.get('head'),
+                                       task.get('report_sha256'))
+        return relevant_tasks
+
+    append_checked(root, accepted, stamp, dependencies=dependencies)
     for row in accepted:
         tasks[row['id']]['status'] = row['status']
     for messages in bad.values():
         for message in messages:
             print(message)
     counts = {}
-    for tid in cloud:
+    for tid in relevant:
         status = tasks[tid].get('status', 'running')
         counts[status] = counts.get(status, 0) + 1
     print('cloud progress: ' + (', '.join('{} {}'.format(k, v) for k, v in sorted(counts.items())) or 'no cloud tasks'))
@@ -1385,7 +1556,7 @@ def main():
     s.add_argument('--head'); s.add_argument('--evidence', required=True); s.set_defaults(fn=cmd_verify)
     s = sub.add_parser('merge'); s.add_argument('--id', required=True); s.add_argument('--force', action='store_true')
     s.add_argument('--commit', required=True); s.add_argument('--main'); s.set_defaults(fn=cmd_merge)
-    s = sub.add_parser('ack'); s.add_argument('--id', required=True); s.add_argument('--hours', type=positive_hours, default=4)
+    s = sub.add_parser('ack'); s.add_argument('--id', required=True); s.add_argument('--hours', type=acknowledgement_hours, default=4)
     s.set_defaults(fn=cmd_ack, force=False)
     s = sub.add_parser('close'); s.add_argument('--id', required=True); s.add_argument('--reason', required=True)
     s.add_argument('--force', action='store_true'); s.set_defaults(fn=cmd_close)
@@ -1394,7 +1565,7 @@ def main():
     s = sub.add_parser('pause'); s.add_argument('--executor', choices=EXECUTORS, required=True); s.add_argument('--resume', action='store_true'); s.set_defaults(fn=cmd_pause)
     sub.add_parser('poll').set_defaults(fn=cmd_poll)
     s = sub.add_parser('agy-sync'); s.add_argument('--delegate-exit'); s.add_argument('--out'); s.set_defaults(fn=cmd_agy_sync)
-    s = sub.add_parser('cloud-envelope'); s.add_argument('--brief', required=True); s.add_argument('--tasks', required=True, nargs='+')
+    s = sub.add_parser('cloud-envelope'); s.add_argument('--brief'); s.add_argument('--tasks', required=True, nargs='+')
     s.add_argument('--branch'); s.add_argument('--main'); s.add_argument('--reprint', action='store_true'); s.set_defaults(fn=cmd_cloud_envelope)
     s = sub.add_parser('cloud-collect'); s.add_argument('--branch'); s.add_argument('--discover', action='store_true')
     s.add_argument('--batch'); s.add_argument('--main'); s.set_defaults(fn=cmd_cloud_collect)

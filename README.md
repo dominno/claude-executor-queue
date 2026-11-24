@@ -8,7 +8,7 @@ project's existing queue when available.
 ## Install with Skills CLI
 
 Use Node.js 22.20+ (or Node.js 24 LTS), npm, Python 3.8+ and Git 2.31+.
-Run this in the project where Claude Code should load the skill:
+Run this from the root of the Git checkout where Claude Code should load the skill:
 
 ```sh
 npx skills add dominno/claude-executor-queue --skill executor-queue -a claude-code
@@ -20,12 +20,14 @@ The skill requires manual invocation in Claude Code. It resolves its helper
 from the loaded skill directory for both types of installation.
 
 If GitHub requires authentication, give Git read access or clone the repository
-first and pass its local path to `npx skills add`. Use `npx skills update`
-to update tracked installs and `npx skills remove executor-queue -a claude-code`
-to remove the skill, adding `-g` if it was installed globally. Keep one installer
-per destination. To switch installers, back up local edits and use the same
-installer that created the current copy to remove it first. Removing the skill
-leaves project records under `.agents/` and does not remove optional project hooks.
+first and replace `dominno/claude-executor-queue` with the local checkout path.
+Use `npx skills update` for tracked GitHub installs. For a local source, update
+the source checkout and rerun the same `npx skills add` command with its path and
+original scope. To remove a Skills CLI install, run
+`npx skills remove executor-queue -a claude-code`, adding `-g` for a global install.
+Keep one installer per destination. To switch installers, back up local edits
+and use the original installer to remove the current copy first. Removing the
+skill leaves project records under `.agents/` and optional project hooks in place.
 
 ### Offline installation
 
@@ -35,8 +37,6 @@ From a local checkout, with Python 3.8+ available:
 ./install.sh
 ./install.sh --check
 ./install.sh --uninstall
-# Optional destination (use the same override for check/uninstall):
-CLAUDE_SKILLS_DIR="$HOME/custom-skills" ./install.sh
 ```
 
 Windows PowerShell, with Python 3.8+ (`py -3`, `python` or `python3`):
@@ -45,14 +45,31 @@ Windows PowerShell, with Python 3.8+ (`py -3`, `python` or `python3`):
 .\install.ps1
 .\install.ps1 --check
 .\install.ps1 --uninstall
-$env:CLAUDE_SKILLS_DIR = Join-Path $HOME 'custom-skills'
-.\install.ps1
 ```
 
-Both installers run the same offline Python helper. Default destination is
-`~/.claude/skills/executor-queue` (the user profile on Windows). `--check` prints
-repo/installed versions and compares SHA-256 hashes; exit 0 means identical,
-exit 1 means missing/different. It does not execute installed code or change files.
+Both installers run the same offline Python helper. It appends `executor-queue`
+to the first configured skills directory in this order: `CLAUDE_SKILLS_DIR`,
+`$CLAUDE_CONFIG_DIR/skills`, then `~/.claude/skills` (under the user profile on
+Windows). `CLAUDE_SKILLS_DIR` controls the copy destination. Set it to an actual
+Claude Code skills directory for the skill to load.
+
+For an offline project install, run from the target project and use the same
+destination for install, `--check`, and `--uninstall`:
+
+```sh
+CLAUDE_SKILLS_DIR="$(git rev-parse --show-toplevel)/.claude/skills" \
+  "/path/to/claude-executor-queue/install.sh"
+```
+
+```powershell
+$env:CLAUDE_SKILLS_DIR = Join-Path (git rev-parse --show-toplevel) '.claude/skills'
+& 'C:\path\to\claude-executor-queue\install.ps1'
+```
+
+`--check` prints repo/installed versions and compares SHA-256 hashes. Exit 0 means identical.
+Exit 1 indicates a missing or different copy or an interrupted transaction. The check leaves files untouched.
+An interrupted operation is recovered by the next install or uninstall. If recovery needs manual intervention,
+the installer prints the path to the saved data.
 Rerun the installer to update a clean copy. Local edits, extra files and unmanaged
 older copies are protected: back them up, then use `--force` to replace them or
 `--uninstall --force` to remove them. An identical unmanaged copy is safe to adopt.
@@ -68,20 +85,35 @@ The script embeds its version so `--version` works without a repo-level VERSION.
 
 ## Quickstart in a new project
 
-Start in a Git project with an initial commit and a chosen base branch. Ask
-Claude to use executor-queue only for the executor work you authorize.
+Start in a Git project with an initial commit and a chosen base branch. Invoke
+`/executor-queue` for the work you authorize.
 
 ```sh
-# Run inside the project after a project-scoped Skills CLI installation.
-# For a global install use $HOME/.claude/skills/executor-queue/scripts/xq.py.
-xq="$PWD/.claude/skills/executor-queue/scripts/xq.py"
+# Run in the checkout where you installed the project skill.
+project=$(git rev-parse --show-toplevel)
+xq="$project/.claude/skills/executor-queue/scripts/xq.py"
 python3 "$xq" --version
 python3 "$xq" init
 python3 "$xq" status --open
 ```
 
-On Windows PowerShell use `$xq = Join-Path $PWD '.claude/skills/executor-queue/scripts/xq.py'`
-and `py -3 $xq` (or `python $xq`). A fresh ledger reports no tasks.
+For a global install, point `xq` at the script under your active Claude Code
+profile, usually `$HOME/.claude/skills/executor-queue/scripts/xq.py`. If you set
+`CLAUDE_CONFIG_DIR`, use that directory in place of `$HOME/.claude`. From a linked
+worktree, use the absolute helper path in the checkout or profile where you
+installed the skill. The helper resolves the shared project ledger.
+
+In Windows PowerShell, find the project-installed helper and call it with the
+Python 3.8+ command available on your machine:
+
+```powershell
+$xq = Join-Path (git rev-parse --show-toplevel) '.claude/skills/executor-queue/scripts/xq.py'
+py -3 $xq --version
+py -3 $xq init
+py -3 $xq status --open
+```
+
+Replace `py -3` with `python` or `python3` if needed. A fresh ledger reports no tasks.
 When ready, run `doctor --need codex`, `agy` or `cloud` for the selected executor.
 A queued record does not start work. Follow the skill's worktree/launch recipe,
 then record the returned jobId and absolute worktree with `assign`. Poll/finish
@@ -92,10 +124,11 @@ files tracked. Never ignore all of `.agents/`. Linked worktrees share the main
 checkout's ledger; `XQ_ROOT` explicitly overrides the root.
 
 The repo's [examples/ folder](examples/) contains task briefs, an agy job, exact
-cloud task sections, keep_busy config and macOS/Linux and Windows Stop-hook
-snippets. Adapt paths/checks before use. Ask before installing a project hook;
-merge settings with existing configuration. Pause idle enforcement instead of
-inventing tasks: `python3 "$xq" pause --executor codex` (`--resume` restores it).
+cloud task sections, keep_busy config and optional Stop hooks for macOS, Linux,
+and Windows Git Bash. Follow the examples to select the installed helper and
+interpreter. Ask before installing a project hook and merge it into existing
+settings. Pause idle enforcement with `python3 "$xq" pause --executor codex`
+and restore it with `--resume`.
 
 ## Executor requirements
 
@@ -145,7 +178,7 @@ bare Git remotes, and need no network or model accounts. CI runs the full Python
 suite on Ubuntu and macOS, Windows-compatible tests on Windows, and a separate
 Skills CLI smoke test of project and global installation.
 
-See [CHANGELOG.md](CHANGELOG.md) and [v3.3 notes](docs/v3.3-notes.md) for release details.
+See [CHANGELOG.md](CHANGELOG.md) and [v3.4 notes](docs/v3.4-notes.md) for release details.
 
 Released under the [MIT license](LICENSE). To report a security issue, use the
 [security policy](SECURITY.md).

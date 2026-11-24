@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 # Executor queue
 
-version: 3.3.0
+version: 3.4.0
 ## Decide and prepare
 
 Use the project's ledger/queue if AGENTS.md or CLAUDE.md defines one. Use xq only when none exists.
@@ -52,7 +52,7 @@ Otherwise launch the -fix1 brief fresh in the same worktree with the normal task
 See [Codex setup and cleanup](https://github.com/dominno/claude-executor-queue/blob/main/docs/codex.md).
 ## agy
 
-Files sent to agy go to Google. No secrets, `.env`, credentials, `.claude/` or user media; only authorized named files.
+Files sent to agy go to Google. Use authorized nonconfidential files, excluding secrets, `.env`, credentials, `.claude/` and user media. Set `$root` to the absolute primary checkout.
 Run `/agy:dry-run` and inspect the manifest for every new file set. Staging the manifest does not isolate agy from its host.
 Run `xq.py preflight --executor agy` immediately before every agy queue run/delegate; proceed only on exit 0.
 After preflight, assign/promote BEFORE delegate/queue run: `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`.
@@ -78,7 +78,7 @@ Show the commit list and obtain user consent to push the brief. Confirm the sepa
 `xq.py cloud-envelope --brief .agents/briefs/<batch>.md --tasks t1 t2` validates pushed bytes/headings and pins the base.
 When origin/HEAD is unset, merge/cloud commands require `--main <branch>` or config `{"main":"<branch>"}`; doctor labels its local fallback.
 Use `cloud-envelope` rather than `assign --executor cloud`. Use `--main <briefs-branch>` for protected main; optional `--branch claude/<session>`; `--reprint` does not reassign.
-Give the user the `/goal` envelope and ask them to include their authorization for result pushes to the named origin and session branch in the same message.
+Give the user the `/goal` envelope and ask them to authorize its exact origin push URL and session branch in the same message.
 `xq.py cloud-collect --branch claude/<session>` fetches/validates reports; `--discover` discovers and collects session branches.
 Reports: max 65536 bytes, summary/test fields 2000 characters, 100 tests; unknown fields dropped, full report hash retained.
 Discovery skips foreign IDs and validates the whole batch before writing. MISSING/CHANGED/PROBLEM needs reconciliation. Local `finish --status failed` cannot stop a remote session;
@@ -97,14 +97,14 @@ With user commit authorization, commit delivery before verifying its head; chang
 With user commit/merge authorization: stage named files, commit in worktree, merge accepted work `--no-ff` from clean primary,
 then `xq.py merge --id <id> --commit "$(git rev-parse HEAD)"` using the resulting merge SHA; preserve results and clean worktrees.
 Assign refuses unverified finished work; `assign --force` starts a new attempt and keeps previous ledger events.
-Finish clears approvals; early forced verify is audit-only. Merge requires verified-head ancestry and reachability from default branch; heed WARNs.
+Finish clears approvals; early forced verify is audit-only. Reverify integrated work only during explicit reconciliation. Merge requires verified-head ancestry and default-branch reachability.
 ## Optional Stop hook
 
-Ask before adding a project Stop hook. Use the actual installed path in `f='<absolute path to scripts/xq.py>'; [ -f "$f" ] || exit 0; exec python3 "$f" hook`.
-Windows Git Bash hooks can use `py -3`. The hook reports state and never authorizes new work. `stop_hook_active` reports without repeated blocking.
+Ask before adding a project Stop hook. For a project install: `f="$CLAUDE_PROJECT_DIR/.claude/skills/executor-queue/scripts/xq.py"; [ -f "$f" ] || exit 0; exec python3 "$f" hook`.
+For other installs use the actual helper path. On Windows Git Bash use the installed Python command. `stop_hook_active` reports without repeated blocking.
 The hook prints preflight refusal reasons instead of demanding idle work when resources/counts forbid launch.
 It flags unverified/stale work (4h; `hook/status --stale-hours N`). Poll refreshes live jobs; `ack --id X --hours N` acknowledges long work.
 Config defaults: `{"limits":{"codex":2,"agy":1},"min_free_gb":5,"max_load_per_cpu":1.0}`.
 Idle applies only to assigned `--queued` work or `.agents/config.json` with `{"keep_busy":["codex"]}`; agy is excluded by default.
 `xq.py pause --executor codex` pauses idle/stale enforcement; add `--resume` to restore. Never create work to silence a hook.
-`close --id X --reason dropped|rejected` retires a ledger entry; remove any corresponding pending bridge job separately.
+`close --id X --reason dropped|rejected` retires a ledger entry. Confirm cancellation separately and reconcile terminal status to release any occupied slot.

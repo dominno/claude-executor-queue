@@ -1,12 +1,14 @@
 """Offline installer integration tests; never touch the real user skill directory."""
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -25,26 +27,38 @@ def install(tmp_path):
         shutil.copy2(str(ROOT / name), str(target))
     home = tmp_path / 'temporary home'
     home.mkdir()
-    env = dict(os.environ, HOME=str(home))
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+    env.pop('CLAUDE_CONFIG_DIR', None)
     env.pop('CLAUDE_SKILLS_DIR', None)
     env.pop('PYTHONHOME', None)
     env.pop('PYTHONPATH', None)
     skills = home / '.claude/skills'
 
-    def run(*args, custom=None):
+    def run(*args, custom=None, config=None):
         local_env = env.copy()
+        if config is not None:
+            local_env['CLAUDE_CONFIG_DIR'] = str(config)
         if custom is not None:
             local_env['CLAUDE_SKILLS_DIR'] = str(custom)
-        return subprocess.run(['sh', str(repo / 'install.sh'), *args], env=local_env,
+        launcher = [sys.executable, str(repo / 'scripts/install.py')] if os.name == 'nt' else [
+            'sh', str(repo / 'install.sh')]
+        return subprocess.run([*launcher, *args], env=local_env,
                               cwd=str(tmp_path), capture_output=True, text=True, timeout=20)
 
-    return SimpleNamespace(repo=repo, home=home, skills=skills,
+    return SimpleNamespace(repo=repo, home=home, skills=skills, env=env,
                            target=skills / 'executor-queue', run=run)
 
 
 def ok(result):
     assert result.returncode == 0, result.stdout + result.stderr
     return result.stdout
+
+
+def load_installer(install):
+    spec = importlib.util.spec_from_file_location('installer_under_test', install.repo / 'scripts/install.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_default_install_check_and_standalone_version(install, tmp_path):
@@ -88,6 +102,20 @@ def test_missing_check_and_uninstall_do_not_create_dirs(install):
     assert result.returncode == 1 and 'MISSING' in result.stdout
     assert 'installed version: not installed' in result.stdout
     ok(install.run('--uninstall'))
+    assert not install.skills.exists()
+    install.skills.mkdir(parents=True)
+    assert install.run('--check').returncode == 1
+    assert not list(install.skills.iterdir())
+
+
+def test_installer_transaction_config_root_and_explicit_override(install, tmp_path):
+    config = tmp_path / 'config root'
+    custom = tmp_path / 'explicit skills'
+    ok(install.run(config=config))
+    ok(install.run('--check', config=config))
+    assert (config / 'skills/executor-queue/LICENSE').is_file()
+    ok(install.run(config=config, custom=custom))
+    assert (custom / 'executor-queue/LICENSE').is_file()
     assert not install.skills.exists()
 
 
@@ -229,7 +257,7 @@ def test_example_json_and_exact_cloud_sections():
     assert '\n## parser-empty-01\n' in brief and '\n## parser-docs-01\n' in brief
 
 
-def test_council_08_guarded_hook_and_upgrade_swap(install, monkeypatch):
+def test_council_08_guarded_hook_and_uninstall_message(install):
     for name in ('settings.json', 'settings.windows.json'):
         command = json.loads((ROOT / 'examples' / name).read_text())['hooks']['Stop'][0]['hooks'][0]['command']
         assert '[ -f ' in command and 'exit 0' in command and 'exec ' in command
@@ -238,9 +266,6 @@ def test_council_08_guarded_hook_and_upgrade_swap(install, monkeypatch):
         assert result.returncode == 0
     ok(install.run())
     assert 'project hooks' in ok(install.run('--uninstall'))
-    source = (ROOT / 'scripts/install.py').read_text()
-    assert 'shutil.rmtree(str(target))' not in source[source.index('# Stage'):]
-    assert 'os.replace(str(target)' in source
 
 
 def test_council_16_powershell_launcher_probe():
@@ -254,28 +279,30 @@ def test_council_16_powershell_launcher_probe():
     assert 'windows-latest' in (ROOT / '.github/workflows/test.yml').read_text()
 
 
-@pytest.mark.parametrize(('previous_install', 'failing_file'),
-                         [(True, 'executor-queue'), (True, 'receipt.json'), (False, 'receipt.json')])
-def test_council_08_failed_install_rolls_back(install, monkeypatch, previous_install, failing_file):
-    import importlib.util
+@pytest.mark.parametrize(('previous_install', 'failing_file', 'mode'), [
+    (True, 'executor-queue', ()),
+    (True, 'receipt.json', ()),
+    (False, 'receipt.json', ()),
+    (True, 'previous-receipt.json', ('--uninstall',)),
+])
+def test_installer_transaction_failed_rename_rolls_back(install, monkeypatch, previous_install, failing_file, mode):
     receipt = install.skills / '.executor-queue-install.json'
     if previous_install:
         ok(install.run())
         previous = (install.target / 'SKILL.md').read_bytes(), receipt.read_bytes()
         (install.repo / 'skills/executor-queue/SKILL.md').write_text('new payload')
-    spec = importlib.util.spec_from_file_location('installer_under_test', install.repo / 'scripts/install.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_installer(install)
     replace = module.os.replace
 
     def fail_publication(src, dst):
-        if Path(src).name == failing_file and Path(dst) in (install.target, receipt):
+        if (Path(src).name == failing_file and Path(dst) in (install.target, receipt)
+                or Path(dst).name == failing_file == 'previous-receipt.json'):
             raise OSError('simulated publication failure')
         return replace(src, dst)
 
     monkeypatch.setattr(module.os, 'replace', fail_publication)
     monkeypatch.setenv('CLAUDE_SKILLS_DIR', str(install.skills))
-    monkeypatch.setattr(sys, 'argv', ['install'])
+    monkeypatch.setattr(sys, 'argv', ['install', *mode])
     with pytest.raises(OSError, match='publication failure'):
         module.main()
     if previous_install:
@@ -285,6 +312,198 @@ def test_council_08_failed_install_rolls_back(install, monkeypatch, previous_ins
         assert not receipt.exists()
     ok(install.run())
     ok(install.run('--check'))
+
+
+def launch_installer(install, *, repo=None, args=(), interrupt_at='', ready=None, release=None):
+    installer = (repo or install.repo) / 'scripts/install.py'
+    # Instrument only filesystem boundaries inside the child. os._exit emulates
+    # a stopped process without giving the installer's rollback handler a turn.
+    code = """
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+installer, point, ready, release, *args = sys.argv[1:]
+replace = os.replace
+open_file = os.open
+
+def replace_at_boundary(source, target):
+    replace(source, target)
+    if Path(target).name == point:
+        if not release:
+            os._exit(78)
+        Path(ready).touch()
+        end = time.monotonic() + 20
+        while not Path(release).exists():
+            if time.monotonic() >= end:
+                raise RuntimeError('timed out waiting for the test')
+            time.sleep(0.01)
+
+def open_at_boundary(path, *args, **kwargs):
+    if ready and not point and Path(path).name == '.executor-queue-install.lock':
+        Path(ready).touch()
+    return open_file(path, *args, **kwargs)
+
+os.replace = replace_at_boundary
+os.open = open_at_boundary
+sys.argv = [installer, *args]
+runpy.run_path(installer, run_name='__main__')
+"""
+    return subprocess.Popen(
+        [sys.executable, '-c', code, str(installer), interrupt_at,
+         str(ready) if ready else '', str(release) if release else '', *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=install.env)
+
+
+@pytest.mark.parametrize(('args', 'interrupt_at'), [
+    ((), 'previous'),
+    ((), 'executor-queue'),
+    ((), '.executor-queue-install.json'),
+    (('--uninstall',), 'previous-receipt.json'),
+])
+def test_installer_transaction_recovers_after_process_exit(install, args, interrupt_at):
+    ok(install.run())
+    receipt = install.skills / '.executor-queue-install.json'
+    original = receipt.read_bytes()
+    source = install.repo / 'skills/executor-queue/SKILL.md'
+    original_source = source.read_bytes()
+    source.write_bytes(original_source + b'\nnew checkout\n')
+    with launch_installer(install, args=args, interrupt_at=interrupt_at) as child:
+        child.communicate(timeout=20)
+        assert child.returncode == 78
+    stage = install.skills / '.executor-queue-install-stage'
+    backup = stage / 'previous/SKILL.md'
+    assert backup.read_bytes() == original_source
+    check = install.run('--check')
+    assert check.returncode == 1 and 'PENDING' in check.stdout
+    assert backup.read_bytes() == original_source
+
+    # Restoring the old source makes recovery observable even when the new
+    # payload and its receipt both reached the destination before the exit.
+    source.write_bytes(original_source)
+    ok(install.run())
+    assert receipt.read_bytes() == original
+    assert (install.target / 'SKILL.md').read_bytes() == original_source
+    assert not stage.exists()
+
+
+def test_installer_transaction_preserves_edits_and_saved_backup(install):
+    ok(install.run())
+    target = install.target / 'SKILL.md'
+    original = target.read_bytes()
+    (install.repo / 'skills/executor-queue/SKILL.md').write_bytes(original + b'\nnew checkout\n')
+    with launch_installer(install, interrupt_at='executor-queue') as child:
+        child.communicate(timeout=20)
+        assert child.returncode == 78
+    target.write_bytes(b'local edit after interruption')
+    result = install.run('--force')
+    assert result.returncode != 0
+    assert 'destination changed during the interrupted operation' in result.stderr
+    assert target.read_bytes() == b'local edit after interruption'
+    assert (install.skills / '.executor-queue-install-stage/previous/SKILL.md').read_bytes() == original
+
+
+def test_installer_transaction_committed_update_survives_interrupted_cleanup(install):
+    ok(install.run())
+    source = install.repo / 'skills/executor-queue/SKILL.md'
+    source.write_bytes(source.read_bytes() + b'\nnew checkout\n')
+    with launch_installer(install, interrupt_at='complete') as child:
+        child.communicate(timeout=20)
+        assert child.returncode == 78
+    stage = install.skills / '.executor-queue-install-stage'
+    assert stage.is_dir()
+    ok(install.run('--check'))
+    assert stage.is_dir()
+    ok(install.run('--uninstall'))
+    assert not stage.exists()
+    assert not install.target.exists()
+
+
+def test_installer_transaction_retires_finished_stage_when_cleanup_is_blocked(install, monkeypatch, capsys):
+    ok(install.run())
+    source = install.repo / 'skills/executor-queue/SKILL.md'
+    original = source.read_bytes()
+    source.write_bytes(original + b'\nnew checkout\n')
+    with launch_installer(install, interrupt_at='complete') as child:
+        child.communicate(timeout=20)
+        assert child.returncode == 78
+
+    module = load_installer(install)
+    rmtree = module.shutil.rmtree
+
+    def deny_removal(path, *args, **kwargs):
+        if Path(path).name == 'previous' and Path(path).parent.name == '.executor-queue-install-stage':
+            raise PermissionError('simulated cleanup denial')
+        return rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.shutil, 'rmtree', deny_removal)
+    monkeypatch.setenv('CLAUDE_SKILLS_DIR', str(install.skills))
+    monkeypatch.setattr(sys, 'argv', ['install', '--uninstall'])
+    assert module.main() == 0
+    assert 'cleanup data retained' in capsys.readouterr().err
+    assert not install.target.exists()
+    assert not (install.skills / '.executor-queue-install-stage').exists()
+    copies = install.skills.glob('.executor-queue-cleanup-*/stage/previous/SKILL.md')
+    assert {copy.read_bytes() for copy in copies} == {original, source.read_bytes()}
+
+
+def test_installer_transaction_diagnoses_legacy_backup_without_removing_it(install):
+    ok(install.run())
+    backup = install.skills / '.executor-queue-legacy01/previous'
+    backup.parent.mkdir()
+    install.target.rename(backup)
+    result = install.run()
+    assert result.returncode != 0
+    assert 'previous installation backup needs manual recovery' in result.stderr
+    assert (backup / 'SKILL.md').is_file()
+    assert not install.target.exists()
+
+
+def wait_for_file(path):
+    end = time.monotonic() + 10
+    while not path.exists() and time.monotonic() < end:
+        time.sleep(0.01)
+    assert path.is_file()
+
+
+def test_installer_transaction_serializes_versions_and_check(install, tmp_path):
+    ok(install.run())
+    next_repo = tmp_path / 'another checkout'
+    shutil.copytree(install.repo, next_repo)
+    source = install.repo / 'skills/executor-queue/SKILL.md'
+    source.write_bytes(source.read_bytes() + b'\ncheckout A\n')
+    next_source = next_repo / 'skills/executor-queue/SKILL.md'
+    next_source.write_bytes(next_source.read_bytes() + b'\ncheckout B\n')
+    a_ready, b_ready, check_ready, release = (tmp_path / name for name in (
+        'a-ready', 'b-ready', 'check-ready', 'release'))
+    with launch_installer(install, interrupt_at='executor-queue', ready=a_ready, release=release) as first:
+        try:
+            wait_for_file(a_ready)
+            with launch_installer(install, repo=next_repo, ready=b_ready) as second, \
+                    launch_installer(install, args=('--check',), ready=check_ready) as check:
+                try:
+                    wait_for_file(b_ready)
+                    wait_for_file(check_ready)
+                    with pytest.raises(subprocess.TimeoutExpired):
+                        check.wait(timeout=0.1)
+                    assert second.poll() is None
+                finally:
+                    release.touch()
+                out, err = second.communicate(timeout=20)
+                assert second.returncode == 0, out + err
+                out, err = check.communicate(timeout=20)
+                # The check can legitimately run either before or after the
+                # second install, but never inspect a half-published update.
+                assert check.returncode in (0, 1) and 'PENDING' not in out, out + err
+        finally:
+            release.touch()
+        out, err = first.communicate(timeout=20)
+        assert first.returncode == 0, out + err
+    assert (install.target / 'SKILL.md').read_bytes() == next_source.read_bytes()
+    receipt = json.loads((install.skills / '.executor-queue-install.json').read_bytes())
+    assert receipt['hashes']['SKILL.md'] == hashlib.sha256(next_source.read_bytes()).hexdigest()
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requires native PowerShell and Windows launcher')

@@ -1,18 +1,23 @@
 # Codex setup and local task recipes
 
-These optional recipes expand the installed skill. Run `xq.py` with Python from
-the skill's installation directory under `.claude/skills/executor-queue/` in the
-project or the user profile. On Windows use `py -3` or your Python 3.8+ command.
+Set the `xq` path using the [quickstart](../README.md#quickstart-in-a-new-project).
+The recipes use `xq.py` as shorthand for `python3 "$xq"`. The shell examples use
+POSIX syntax. On Windows run those examples in Git Bash and use `py -3 "$xq"` or
+your available Python 3.8+ command. In PowerShell, call the helper directly with
+`py -3 $xq` or your available Python command.
 
 ## Setup
 
 Run `xq.py doctor --need codex,agy,cloud`, selecting only the executors needed. Missing unused tools are SKIP.
 Git >= 2.31 is required by the primary-checkout recipe (`--path-format`); doctor reports the version and warns below 2.31.
 It checks HEAD, the default branch, Node/auth, plugin capabilities, ignores and (for cloud only) origin.
-It prints shell assignments `CC=...` and `AGYB=...`; use those exact resolved paths, never an unquoted multi-version glob.
-For each supported marketplace, resolution prefers `installed_plugins.json` and falls back to its cache.
-The legacy `agy@agy-bridge-local` is checked after `agy@agy-bridge`. If `CLAUDE_CONFIG_DIR` is set,
-doctor looks under that profile.
+Doctor prints the resolved `CC` and `AGYB` paths as shell assignments. On Windows it
+prints PowerShell syntax such as `$CC='C:\path\to\codex-companion.mjs'`. For Git
+Bash, use the same path with Bash assignment syntax, such as
+`CC='C:/path/to/codex-companion.mjs'`. Keep `"$CC"` quoted in every call.
+Doctor uses `installed_plugins.json` and selects project or local entries for the current checkout.
+It reads the marketplace cache for older profiles without an installed-plugin registry. The legacy
+`agy@agy-bridge-local` is checked after `agy@agy-bridge`. `CLAUDE_CONFIG_DIR` selects the profile.
 
 - Codex: `npm install -g @openai/codex`, `codex login` (or `codex login --device-auth`), then
   `/plugin marketplace add openai/codex-plugin-cc`, `/plugin install codex@openai-codex`, `/codex:setup`.
@@ -22,8 +27,8 @@ doctor looks under that profile.
 - agy plugin: run `/plugin marketplace add dominno/claude-agy-bridge` and `/plugin install agy@agy-bridge`.
   For a local clone, run `/plugin marketplace add <clone>` and the same install command. For a one-session trial,
   start `claude --plugin-dir <clone>` and invoke the bridge directly as `<clone>/bin/agy-bridge` in shell commands.
-  Doctor discovers installed copies through the plugin registry and cache, so use the marketplace install for
-  automatic discovery. Rerun doctor after installation.
+  Use the marketplace install for automatic discovery, then rerun doctor. For agy, xq uses the installed
+  bridge's own `doctor` command to check CLI compatibility and authentication.
   Queue integration requires **both** `queue --help` and `verdict --help` to succeed. Those probes distinguish
   builds that share a version number. If either fails, run `/plugin update agy@agy-bridge` and rerun doctor.
 
@@ -53,9 +58,9 @@ No executor receives permission for paid calls, network, push or merge merely by
 3. Immediately before every Codex launch (including retries/resumes), run preflight and proceed only on exit 0.
    Use the `CC` from doctor:
    ```sh
-   xq.py preflight --executor codex || exit $?
+   python3 "$xq" preflight --executor codex || exit $?
    node "$CC" task --background --write --cwd "$wt" --effort medium --prompt-file "$root/.agents/briefs/<id>.md"
-   xq.py assign --id <id> --executor codex --brief .agents/briefs/<id>.md --job <jobId> --worktree "$wt"
+   python3 "$xq" assign --id <id> --executor codex --brief .agents/briefs/<id>.md --job <jobId> --worktree "$wt"
    ```
    `--prompt-file` is resolved relative to `--cwd`: always pass an absolute existing path to the current brief.
    Record the returned jobId and absolute worktree immediately. Before launch, optional `assign --queued` records a

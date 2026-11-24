@@ -245,9 +245,12 @@ def test_cloud_envelope_pins_base_and_records_each_task(queue, capsys):
     # Critic items 11, 12 and 17: v2 expands these rules into separate clauses.
     for rule in ('never push main.', 'Do not open PRs or push other branches.',
                  'only if the user authorized this batch',
+                 'git remote get-url --push --all origin', 'origin is configured as a mirror',
+                 'git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch"',
                  'Before pushing, inspect all outgoing commits',
                  'Limit network access to authorized Git operations on that origin.'):
         assert rule in output.out
+    assert 'git push origin HEAD' not in output.out
     assert 'recorded 2 assign events' in output.err
     rows = q.xq.events(q.repo)
     assert [e['id'] for e in rows] == ['c001', 'c002']

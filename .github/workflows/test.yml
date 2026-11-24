@@ -68,6 +68,8 @@ jobs:
 
             run_isolated npx --yes skills@1.9.0 add "$source_dir" \
               --skill executor-queue --agent claude-code --yes "${scope_options[@]}"
+            inventory=$(find -L "$install_dir" -type f -printf '%P\n' | LC_ALL=C sort)
+            test "$inventory" = $'LICENSE\nSKILL.md\nscripts/xq.py'
             for file in LICENSE SKILL.md scripts/xq.py; do
               cmp "$source_dir/skills/executor-queue/$file" "$install_dir/$file"
             done
@@ -91,9 +93,9 @@ jobs:
       - run: python -m pip install 'pytest>=7,<8.4'
       # The full suite uses POSIX launchers and fake executors on Ubuntu/macOS.
       - name: Test the PowerShell installer and release files
-        run: python -m pytest -q tests/test_install.py -k "windows_native_install or powershell_launcher_probe or release_markers or example_json"
+        run: python -m pytest -q tests/test_install.py -k "windows_native_install or powershell_launcher_probe or release_markers or example_json or installer_transaction or clean_32_update"
       - name: Test the queue on Windows
-        run: python -m pytest -q tests/test_xq.py -k "council_11 or council_12 or council_13_windows or council_14 or n9_windows_load_fallback"
+        run: python -m pytest -q tests/test_xq.py -k "council_11 or council_12 or council_13_windows or council_14 or n9_windows_load_fallback or duplicate_assignment_transaction_lock"
         env:
           GIT_ALLOW_PROTOCOL: file
           GIT_TERMINAL_PROMPT: '0'

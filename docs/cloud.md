@@ -21,10 +21,14 @@ restricted network policy, and **no secrets in environment settings**. Try one s
 3. `xq.py cloud-envelope --brief .agents/briefs/<batch>.md --tasks t1 t2 [--main <briefs-branch>] [--branch claude/<session>]`.
    It verifies pushed brief bytes, task headings and unignored status paths, pins base, then records assignments.
    Use fresh IDs for every cloud attempt, including failed/blocked retries, so an old report cannot finish new work.
-   Branch is optional: the session uses `git push origin HEAD` and reports its branch. Find the name in the cloud UI/result
-   or with `git ls-remote --heads origin 'refs/heads/claude/*'`. `--reprint` prints the recorded envelope without reassigning.
-   Ask the user to include their explicit authorization for result pushes, naming the Git origin and session branch,
-   in the same message as `/goal`. The cloud session inspects its outgoing commits before any authorized result push.
+   Choose a `claude/` branch in the session and use `--branch` when its name is known.
+   `xq.py cloud-envelope --reprint --tasks <id>` uses the recorded handoff. For new envelopes it restores the original
+   task order and branch, even if the brief has been removed locally. Include explicit user authorization for the exact push URL and the named session branch
+   in the `/goal` message. In the session, verify that `git remote get-url --push --all origin` resolves to one approved URL,
+   the current branch matches the approved `claude/` branch, and origin is not configured as a mirror. Keep credentials out
+   of the transcript. Review all outgoing commits and sensitive paths before publishing. With `session_branch` set to the
+   checked branch, push the single approved ref:
+   `git push --no-follow-tags --recurse-submodules=no origin "HEAD:refs/heads/$session_branch"`.
 4. `xq.py cloud-collect --branch claude/<session> [--batch <batch>]`, or `--discover` to inspect origin's `claude/*` refs.
    Fetches only. Validate all reports in each batch before importing that batch: schema, branch, pinned fork point, task commit and distinct head.
    Network Git disables terminal prompts and times out after five minutes per operation.
@@ -43,14 +47,16 @@ restricted network policy, and **no secrets in environment settings**. Try one s
 
 Discovery considers only refs beginning `refs/heads/claude/`, skips foreign IDs, and applies `--batch`
 before report validation. Explicit branches must start `claude/`; an unknown ID remains a hard error there.
+Each new envelope has its own batch identity. The brief name is available as a filter and can match multiple envelopes.
 A bound task reported on another branch is a PROBLEM. An unbound task requires status.branch to match
 and exactly one reporting branch; stop/cancel stale sessions locally rather than importing conflicting work.
 A cancelled task no longer blocks discovery through cross-branch fingerprint checks. Invalid reports block
 only their own batch; a changed imported report still requires explicit reconciliation.
 
 The session fork point against the selected briefs branch must equal the pinned base. A done report needs
-head != base, a commit message containing the exact task ID and a distinct head per task. Verification
-stores that head. Merge recording requires it to be an ancestor of the integration commit and that commit
+head != base, a commit message containing the exact task ID and a distinct head per task. The ledger stores the full
+delivery SHA after collection, including when the report uses an abbreviation. Repeated collection confirms that the
+delivery remains an ancestor of the session branch. Merge recording requires it to be an ancestor of the integration commit and that commit
 to be reachable from the local default branch. Warnings identify later commits and non-pass sibling IDs;
 review them before integrating. Ordinary verification requires the original collected delivery commit. If you integrate
 by cherry-pick, verify the resulting commit independently and record the rewritten SHA with
@@ -67,6 +73,8 @@ cloud base and labels its local HEAD fallback separately. An existing origin/HEA
 Create cloud tasks with `cloud-envelope`; `assign --executor cloud` (including `--queued`) refuses.
 Reports must fit 65536 bytes, with a summary of at most 2000 characters, at most 100 tests,
 and test cmd/result strings of at most 2000 characters each. An oversized report prevents the batch from being
-appended. An interrupted disk write can leave earlier complete events in the ledger. Unknown top-level/test keys are dropped from stored reports. `report_sha256`
+appended. A torn multi-task write is ignored as a unit when replaying the ledger. Unknown top-level/test keys are dropped from stored reports. `report_sha256`
 hashes the full parsed report (sorted JSON keys; whitespace is ignored), including unknown keys,
 so subsequent changes still produce CHANGED. Pre-3.2 reports compare against their stored content.
+Use xq 3.4 or later in all sessions that share this ledger. It reads earlier JSONL entries, while older helpers skip
+the new multi-task records. Back up the ledger before downgrading.

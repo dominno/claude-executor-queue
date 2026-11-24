@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.4 — 3.4.0 — 2026-11-24
+
+- Bind cloud result pushes to the approved endpoint and session branch.
+- Give cloud envelopes independent batch identities and preserve canonical delivery commits.
+- Reconcile terminal results for closed tasks and protect integration records from stale verification.
+- Align agy diagnostics with the bridge and prefer plugins scoped to the current Claude Code project.
+- Harden offline install and uninstall recovery, respect Claude profiles, and clarify Skills CLI updates from local paths.
+
 ## v3.3 — 3.3.0 — 2026-11-24
 
 - Package the Claude Code skill for `npx skills add` at project and user scope, under the MIT license.

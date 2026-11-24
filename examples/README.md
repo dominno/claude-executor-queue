@@ -8,18 +8,24 @@ Adapt named files, checks and IDs before use; these examples do not launch jobs.
 - `cloud-batch.md`: copy to `.agents/briefs/<batch>.md`; exact `## <id>` sections
   must match `cloud-envelope --tasks`. Review all outgoing commits before each authorized push.
 - `.agents/config.json`: opt-in keep_busy for Codex; merge with existing config.
-- `settings.json`: macOS/Linux project `.claude/settings.json` Stop-hook snippet.
-- `settings.windows.json`: Windows Git Bash hook command using `py -3` and a missing-script guard.
+- `settings.json`: macOS/Linux Stop-hook snippet using `python3`.
+- `settings.windows.json`: Windows Stop-hook snippet for Claude Code with Git Bash using `py -3`.
 
-Ask the user before adding a Stop hook. Merge snippets into existing settings;
-do not replace unrelated configuration. The snippets assume a user-level installation.
-For a project-scoped or custom install, set `f` to the actual helper path.
+Ask the user before adding a Stop hook. Merge the snippet into the existing
+project `.claude/settings.json`. Both snippets find the project-scoped skill using
+`$CLAUDE_PROJECT_DIR` and skip the hook when its helper is absent.
+
+For a global install, set `f` to the helper path under your active Claude Code
+profile, usually `$HOME/.claude/skills/executor-queue/scripts/xq.py`. If your path
+or interpreter is specific to your machine, put the hook in `.claude/settings.local.json`.
+On Windows confirm Git Bash can run `py -3 --version`. If it uses `python` or
+`python3`, confirm that command reports Python 3.8+ and replace `exec py -3` in
+the snippet with `exec python` or `exec python3`. Leave the command in Bash syntax
+even when you use PowerShell to install the skill. Follow the
+[PowerShell quickstart](../README.md#quickstart-in-a-new-project) for direct calls.
+The agy bridge requires macOS or Linux.
+
 If the backlog is empty, pause or review the configuration.
-
-Both Stop commands check for the script before launching it, so cloud clones, teammates and uninstalled
-copies can stop normally. With a user-level installation, PowerShell runs the
-ledger via `py -3 "$HOME/.claude/skills/executor-queue/scripts/xq.py"` or `python`
-with the same path. The agy bridge requires macOS or Linux.
 Run init before doctor. Config is trackable policy; ledger/lock/review/config temp files stay local.
 For long work use `ack --id parser-empty-01 --hours 12`, then poll/check actual progress. After a verified
 fix merges, close its parent with `close --id parser-empty-01 --reason superseded-by:parser-empty-01-fix1`.

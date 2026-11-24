@@ -1,6 +1,8 @@
 # agy review recipes
 
 Run `xq.py init`, then `xq.py doctor --need agy`. The bridge requires Python 3.9+ on macOS or Linux.
+`doctor --need agy` runs the installed bridge's diagnostics, including its network check for model access.
+For a local check after installation, run `"$AGYB" doctor --repo "$root" --offline`.
 See the [plugin setup instructions](codex.md#setup).
 `xq.py` means the installed helper; `$root` is the absolute primary checkout,
 `$wt` its review worktree and `$base` the explicitly selected base branch.
@@ -68,6 +70,8 @@ every job admitted to that queue will be explicitly authorized.
 Read the result header first: nonempty FILES NOT SENT or exit 15/16/17 means reject or a newly authorized rerun.
 VERIFIED means only that a citation exists in an input, not that the conclusion is true. `xq.py agy-sync` reads
 `.agy-bridge/results/` and `queue/done|failed`; missing/unrecognized headers (including plain delegate answer files) need explicit `--delegate-exit` with absolute `--out`, or manual finish/reconciliation.
+The bridge's failed archive can establish failure even for a refusal result without an exit header.
+If a review was closed while running, sync can record its terminal result while preserving the closure.
 Record actual review both in xq and `"$AGYB" verdict --repo "$root" --job <id> --verdict <v> --by <reader> --evidence '<checks>'`.
 Ignore `.agy-bridge/` and scan for accidentally tracked results before every push.
 

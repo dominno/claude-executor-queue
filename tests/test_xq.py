@@ -251,7 +251,7 @@ def test_envelope_optional_branch_reprint_and_pinned_rules(q, capsys):
     (q.repo / 'AGENTS.md').write_text('Uncommitted hostile rules')
     assert q.envelope('a', 'b') == 0
     text = capsys.readouterr().out
-    assert q.base in text and 'git push origin HEAD' in text
+    assert q.base in text and 'git push --no-follow-tags --recurse-submodules=no origin' in text
     assert f'git show {q.base}:AGENTS.md' in text
     assert 'untrusted' in text and 'environment' in text
     before = q.xq.events(q.repo)
@@ -368,6 +368,8 @@ def test_plugin_resolution_uses_known_marketplaces(q):
     legacy = plugins / 'cache/agy-bridge-local/agy/99.0/bin/agy-bridge'
     legacy.parent.mkdir(parents=True)
     legacy.write_text('')
+    assert q.xq.plugin_binary('agy') is None
+    (plugins / 'installed_plugins.json').unlink()
     assert q.xq.plugin_binary('agy') == str(legacy)
     supported = plugins / 'cache/agy-bridge/agy/1.0/bin/agy-bridge'
     supported.parent.mkdir(parents=True)
@@ -375,9 +377,29 @@ def test_plugin_resolution_uses_known_marketplaces(q):
     assert q.xq.plugin_binary('agy') == str(supported)
 
 
+def test_plugin_resolution_respects_checkout_scope(q):
+    plugins = q.home / '.claude/plugins'
+    user = install_companion(q, '2.0.0', '')
+    local = install_companion(q, '1.0.0', '')
+    other = install_companion(q, '99.0.0', '')
+    registry = plugins / 'installed_plugins.json'
+    entries = [
+        {'scope': 'user', 'installPath': str(user.parents[1])},
+        {'scope': 'local', 'installPath': str(other.parents[1]), 'projectPath': str(q.tmp_path / 'another')},
+    ]
+    registry.write_text(json.dumps({'plugins': {'codex@openai-codex': entries}}))
+    assert q.xq.plugin_binary('codex') == str(user)
+    entries.append({'scope': 'local', 'installPath': str(local.parents[1]), 'projectPath': str(q.repo)})
+    registry.write_text(json.dumps({'plugins': {'codex@openai-codex': entries}}))
+    assert q.xq.plugin_binary('codex') == str(local)
+    del entries[0]
+    del entries[1]
+    registry.write_text(json.dumps({'plugins': {'codex@openai-codex': entries}}))
+    assert q.xq.plugin_binary('codex') is None
+
+
 def test_doctor_agyb_cache_capabilities_and_cloud_requirements(q, capsys):
     q.cli('init')
-    q.fake('agy', 'import sys\nprint("models")\nsys.exit(11 if "--bad" in sys.argv else 0)')
     p = q.home / '.claude/plugins/cache/agy-bridge/agy/0.1.1/bin/agy-bridge'
     p.parent.mkdir(parents=True)
     p.write_text('#!' + sys.executable + '\nimport sys\nsys.exit(0 if sys.argv[1] == "queue" else 1)')
@@ -389,6 +411,38 @@ def test_doctor_agyb_cache_capabilities_and_cloud_requirements(q, capsys):
     assert q.cli('doctor', '--need', 'agy,cloud') == 0
     q.git('remote', 'remove', 'origin')
     assert q.cli('doctor', '--need', 'cloud') == 1
+
+
+@pytest.mark.parametrize('windows,bridge_exit', [(False, 0), (False, 14), (True, 0)])
+def test_agy_doctor_uses_bridge_diagnostics(q, monkeypatch, capsys, windows, bridge_exit):
+    q.cli('init')
+    monkeypatch.setattr(q.xq, 'WINDOWS', windows)
+    bridge = str(q.home / 'bin/agy-bridge')
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args: bridge)
+    monkeypatch.setattr(q.xq, 'bridge_command', lambda path: [path])
+    original = q.xq.run
+    calls = []
+
+    def run(argv, **kwargs):
+        if argv[0] == 'git':
+            return original(argv, **kwargs)
+        calls.append((argv, kwargs))
+        assert argv[0] == bridge
+        if argv[1] == 'doctor':
+            detail = 'fail agy version: unsupported major' if bridge_exit else 'ok   agy models: 1 line(s) listed'
+            return subprocess.CompletedProcess(argv, bridge_exit, detail, '')
+        return subprocess.CompletedProcess(argv, 0, '', '')
+
+    monkeypatch.setattr(q.xq, 'run', run)
+    assert q.cli('doctor', '--need', 'agy') == (1 if windows or bridge_exit else 0)
+    output = capsys.readouterr().out
+    if windows:
+        assert calls == []
+        assert 'MISSING agy platform:' in output and 'AGYB=' not in output
+    else:
+        assert calls == [([bridge, 'doctor', '--repo', str(q.repo)], {'timeout': 60}),
+                         ([bridge, 'queue', '--help'], {}), ([bridge, 'verdict', '--help'], {})]
+        assert ('unsupported major' if bridge_exit else 'agy models: 1 line(s) listed') in output
 
 
 def test_codex_job_poll_result_and_failed(q):
@@ -842,6 +896,7 @@ def test_review_10_empty_append_does_no_io(q, monkeypatch, rows):
     monkeypatch.setattr(Path, 'open', unexpected)
     monkeypatch.setattr(q.xq.os, 'fsync', unexpected)
     q.xq.append_many(q.repo, rows)
+    q.xq.append_checked(q.repo, rows, None)
 
 
 @pytest.mark.parametrize('ending', [b'', b'\n'])
@@ -887,6 +942,44 @@ def test_review_10_append_reads_only_last_byte_and_recovers_partial_line(q, monk
         contents = fh.read()
     assert contents.startswith(previous + (b'' if ending else b'\n'))
     assert json.loads(contents.splitlines()[-1])['summary'] == 'zażółć'
+
+
+def test_cloud_envelope_retry_after_torn_batch(q, capsys):
+    q.assign()
+    ledger = q.xq.ledger_path(q.repo)
+    previous = ledger.read_bytes()
+    assert q.envelope('a', 'b') == 0
+    encoded = ledger.read_bytes()[len(previous):]
+    assert [event['id'] for event in json.loads(encoded)['events']] == ['a', 'b']
+    assert set(q.xq.state(q.repo)) == {'local', 'a', 'b'}
+
+    ledger.write_bytes(previous + encoded[:-4])
+    assert set(q.xq.state(q.repo)) == {'local'}
+    assert 'corrupt ledger line 2 ignored' in capsys.readouterr().err
+    assert q.envelope('a', 'b') == 0
+    assert set(q.xq.state(q.repo)) == {'local', 'a', 'b'}
+
+
+def test_append_checked_allows_independent_updates_and_heartbeats(q):
+    q.assign('local')
+    q.assign('another-task')
+    _, stamp = q.xq.snapshot(q.repo)
+    q.cli('ack', '--id', 'local')
+    finish(q, 'another-task')
+    event = dict(event='finish', id='local', status='done')
+    q.xq.append_checked(q.repo, [event], stamp)
+    tasks = q.xq.state(q.repo)
+    assert tasks['local']['status'] == tasks['another-task']['status'] == 'done'
+    assert tasks['local']['ack_until']
+
+
+def test_append_checked_refuses_a_concurrent_task_id_case_collision(q):
+    _, stamp = q.xq.snapshot(q.repo)
+    q.assign('A')
+    event = dict(event='assign', id='a', executor='cloud')
+    with pytest.raises(SystemExit, match='ledger changed during query'):
+        q.xq.append_checked(q.repo, [event], stamp)
+    assert set(q.xq.state(q.repo)) == {'A'}
 
 
 @pytest.mark.parametrize('verdict', ['fixes', 'reject'])
@@ -1077,6 +1170,28 @@ def test_verify_requires_meaningful_reader_and_evidence(q):
     assert q.xq.events(q.repo)[-1]['evidence'] == 'checks'
 
 
+def test_reverification_reconciles_existing_merge_explicitly(q):
+    q.assign()
+    finish(q)
+    verify(q)
+    q.cli('merge', '--id', 'local', '--commit', q.base)
+    q.git('commit', '--allow-empty', '-m', 'follow-up')
+    head = q.git('rev-parse', 'HEAD')
+    args = ('verify', '--id', 'local', '--by', 'reader', '--verdict', 'pass', '--evidence', 'checked')
+
+    with pytest.raises(SystemExit, match='already merged'):
+        q.cli(*args, '--head', head)
+    assert q.cli(*args, '--head', q.base, '--force') == 0
+    assert q.xq.state(q.repo)['local']['merged'] == q.base
+
+    assert q.cli(*args, '--head', head, '--force') == 0
+    task = q.xq.state(q.repo)['local']
+    assert task['verified_head'] == head
+    assert 'merged' not in task and 'commit' not in task
+    assert [event['commit'] for event in q.xq.events(q.repo) if event['event'] == 'merge'] == [q.base]
+    assert q.cli('merge', '--id', 'local', '--commit', head) == 0
+
+
 def test_council_03_discover_skips_foreign(q, capsys):
     q.envelope()
     council_publish(q, {'orphan': {}}, branch='claude/foreign')
@@ -1197,7 +1312,8 @@ def test_closed_task_requires_explicit_reconciliation(q, monkeypatch):
         q.cli('merge', '--id', 'local', '--commit', q.base)
     assert q.cli('finish', '--id', 'local', '--status', 'done', '--force') == 0
     assert q.xq.events(q.repo)[-1]['force'] is True
-    assert not q.xq.state(q.repo)['local'].get('closed')
+    assert q.xq.state(q.repo)['local']['closed']
+    assert q.xq.state(q.repo)['local']['reason'] == 'rejected'
 
     q.assign('running')
     q.cli('close', '--id', 'running', '--reason', 'dropped', '--force')
@@ -1207,6 +1323,50 @@ def test_closed_task_requires_explicit_reconciliation(q, monkeypatch):
     assert q.xq.events(q.repo) == before
     with pytest.raises(SystemExit, match='closed'):
         q.cli('ack', '--id', 'running')
+    assert q.cli('finish', '--id', 'running', '--status', 'failed', '--force') == 0
+    running = q.xq.state(q.repo)['running']
+    assert running['status'] == 'failed' and running['closed']
+
+
+def test_historical_forced_finish_retains_its_original_reopen_behavior(q):
+    q.assign()
+    q.cli('close', '--id', 'local', '--reason', 'dropped', '--force')
+    q.xq.append(q.repo, dict(event='finish', id='local', status='failed', force=True))
+    assert not q.xq.state(q.repo)['local'].get('closed')
+
+
+def test_poll_releases_closed_running_slot_only_on_terminal_evidence(q, monkeypatch, capsys):
+    (q.repo / '.agents/config.json').write_text('{"limits":{"codex":1}}', encoding='utf-8')
+    q.assign('local', 'codex', '--job', 'recorded', '--worktree', str(q.repo))
+    q.cli('close', '--id', 'local', '--reason', 'dropped', '--force')
+    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind: 'companion')
+    real_run = q.xq.run
+    status = 'running'
+
+    def fake_run(argv, **kwargs):
+        if argv[0] != 'node':
+            return real_run(argv, **kwargs)
+        assert argv[2:4] == ['status', 'recorded']
+        return subprocess.CompletedProcess(argv, 0, json.dumps({'job': {'status': status}}), '')
+
+    monkeypatch.setattr(q.xq, 'run', fake_run)
+    assert q.cli('poll') == 0
+    assert q.cli('preflight', '--executor', 'codex') == 1
+    assert '1 closed awaiting terminal evidence' in capsys.readouterr().out
+    status = 'unavailable'
+    assert q.cli('poll') == 1
+    assert q.cli('preflight', '--executor', 'codex') == 1
+    status = 'cancelled'
+    assert q.cli('poll') == 0
+    assert q.cli('preflight', '--executor', 'codex') == 0
+    task = q.xq.state(q.repo)['local']
+    assert task['status'] == 'failed'
+    assert task['closed'] and task['reason'] == 'dropped'
+    capsys.readouterr()
+    q.cli('status', '--open')
+    assert capsys.readouterr().out == 'no tasks\n'
+    q.cli('status')
+    assert capsys.readouterr().out.rstrip().endswith('CLOSED')
 
 
 @pytest.mark.parametrize('command, args', [
@@ -1220,11 +1380,15 @@ def test_hour_flags_reject_invalid_thresholds(q, command, args, value, capsys):
     assert 'must be a finite positive number of hours' in capsys.readouterr().err
 
 
-def test_ack_refuses_an_unrepresentable_deadline(q):
+@pytest.mark.parametrize('hours', ['8761', '1e100'])
+def test_ack_keeps_one_year_limit(q, capsys, hours):
     q.assign()
+    assert q.cli('ack', '--id', 'local', '--hours', '8760') == 0
     before = q.xq.events(q.repo)
-    with pytest.raises(SystemExit, match='too large for an acknowledgement deadline'):
-        q.cli('ack', '--id', 'local', '--hours', '1e100')
+    with pytest.raises(SystemExit) as exc:
+        q.cli('ack', '--id', 'local', '--hours', hours)
+    assert exc.value.code == 2
+    assert 'must be at most 8760 hours' in capsys.readouterr().err
     assert q.xq.events(q.repo) == before
 
 
@@ -1300,8 +1464,6 @@ def test_council_15_agy_python_and_powershell(q, monkeypatch, capsys):
     bridge = q.tmp_path / "a bridge's script"
     bridge.write_text('import sys\nsys.exit(0)')
     monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind: str(bridge))
-    agy = q.fake('agy.cmd', 'print("models")')
-    monkeypatch.setattr(q.xq.shutil, 'which', lambda name: str(agy) if name == 'agy' else None)
     assert q.cli('doctor', '--need', 'agy') == 0
     assert str(bridge) in capsys.readouterr().out
     monkeypatch.setattr(q.xq, 'WINDOWS', True)
@@ -1884,6 +2046,46 @@ def test_agy_sync_waits_for_pending_archive_and_ignores_closed_task(q):
     assert states['closed']['status'] == 'queued' and states['closed']['closed']
 
 
+@pytest.mark.parametrize('archive', ['done', 'failed'])
+def test_agy_sync_records_closed_running_terminal_evidence(q, archive):
+    q.assign('local', 'agy')
+    q.cli('close', '--id', 'local', '--reason', 'dropped', '--force')
+    closed = q.xq.state(q.repo)['local']['closed']
+    assert q.cli('agy-sync') == 0
+    assert q.xq.state(q.repo)['local']['status'] == 'running'
+
+    bridge = q.repo / '.agy-bridge'
+    job = bridge / 'queue' / archive / 'local.job'
+    job.parent.mkdir(parents=True)
+    job.write_text('{"name":"local"}', encoding='utf-8')
+    result = bridge / 'results/local.md'
+    result.parent.mkdir()
+    # The bridge archives invalid inputs and emits a refusal without an exit header.
+    text = 'exit_code: 0\n\n## Round 1\nReview' if archive == 'done' else '# Queue refusal\n\ninvalid job'
+    result.write_text(text, encoding='utf-8')
+    assert q.cli('agy-sync') == 0
+    task = q.xq.state(q.repo)['local']
+    assert task['status'] == archive
+    assert task['closed'] == closed and task['reason'] == 'dropped'
+    assert task['result'] == str(result)
+
+
+def test_agy_sync_accepts_large_bridge_file_manifest(q):
+    q.assign('local', 'agy')
+    bridge = q.repo / '.agy-bridge'
+    archive = bridge / 'queue/done/local.job'
+    archive.parent.mkdir(parents=True)
+    archive.write_text('{"name":"local"}', encoding='utf-8')
+    result = bridge / 'results/local.md'
+    result.parent.mkdir(parents=True)
+    files = ', '.join('docs/' + 'a' * 130 + f'/review-{i}.md' for i in range(500))
+    assert len(files.encode('utf-8')) > 65536
+    result.write_text('exit_code: 0\n\n### Attempt 1 (round 1)\nexit_code: 0\nfiles sent: ' + files
+                      + '\n\n## Round 1\nReview\n', encoding='utf-8')
+    assert q.cli('agy-sync') == 0
+    assert q.xq.state(q.repo)['local']['status'] == 'done'
+
+
 def test_agy_result_header_is_bounded_and_answer_can_be_large(q, monkeypatch, capsys):
     q.assign('local', 'agy')
     result = q.repo / '.agy-bridge/results/local.md'
@@ -1964,3 +2166,126 @@ def test_cloud_report_invalid_unicode_does_not_block_another_batch(q, capsys):
     states = q.xq.state(q.repo)
     assert states['a']['status'] == 'running'
     assert states['b']['status'] == 'done'
+
+
+def test_cloud_envelopes_can_reuse_a_brief_without_sharing_collection_state(q, capsys):
+    assert q.envelope('a') == 0
+    assert q.envelope('b', **{'--branch': 'claude/second'}) == 0
+    state = q.xq.state(q.repo)
+    assert state['a']['batch'] == state['b']['batch']
+    assert state['a']['batch_id'] != state['b']['batch_id']
+    council_publish(q, {'a': {}})
+    capsys.readouterr()
+    assert q.collect('--batch', 'batch') == 0
+    assert 'MISSING b' not in capsys.readouterr().out
+    assert q.xq.state(q.repo)['b']['status'] == 'running'
+    council_publish(q, {'b': {}}, branch='claude/second')
+    assert q.cli('cloud-collect', '--branch', 'claude/second', '--batch', 'batch') == 0
+    assert q.xq.state(q.repo)['b']['status'] == 'done'
+
+
+def test_cloud_explicit_branch_collect_ignores_unrelated_legacy_binding(q):
+    for tid, branch in [('a', 'claude/test'), ('b', 'claude/second')]:
+        q.xq.append(q.repo, dict(event='assign', id=tid, executor='cloud', brief=q.brief,
+                                 base=q.base, main='main', batch='batch', branch=branch))
+    council_publish(q, {'a': {}})
+    assert q.collect('--batch', 'batch') == 0
+    assert q.xq.state(q.repo)['b']['status'] == 'running'
+
+
+def test_cloud_discovery_keeps_distinct_legacy_branch_bindings_isolated(q):
+    for tid, branch in [('a', 'claude/test'), ('b', 'claude/second')]:
+        q.xq.append(q.repo, dict(event='assign', id=tid, executor='cloud', brief=q.brief,
+                                 base=q.base, main='main', batch='batch', branch=branch))
+    q.publish({'a': 'not-json'})
+    council_publish(q, {'b': {}}, branch='claude/second')
+    assert q.cli('cloud-collect', '--discover', '--batch', 'batch') == 1
+    states = q.xq.state(q.repo)
+    assert states['a']['status'] == 'running'
+    assert states['b']['status'] == 'done'
+
+
+def test_cloud_reprint_uses_recorded_order_and_original_destination(q, capsys):
+    assert q.envelope('b', 'a') == 0
+    original = capsys.readouterr().out
+    council_publish(q, {'b': {}, 'a': {}})
+    assert q.collect() == 0
+    capsys.readouterr()
+    (q.repo / q.brief).unlink()
+    before = q.xq.events(q.repo)
+    assert q.cli('cloud-envelope', '--reprint', '--tasks', 'a') == 0
+    assert capsys.readouterr().out == original
+    assert q.xq.events(q.repo) == before
+
+
+def test_cloud_repeat_preserves_canonical_delivery_and_detects_changed_lineage(q, capsys):
+    assert q.envelope('a') == 0
+    reports = council_publish(q, {'a': {}})
+    head = reports['a']['head']
+    report = q.report(head=head[:12])
+    q.git('checkout', 'claude/test')
+    status_file = q.repo / '.agents/cloud-status/a.json'
+    status_file.write_text(json.dumps(report), encoding='utf-8')
+    q.git('add', status_file)
+    q.git('commit', '-m', 'abbreviate fixture delivery')
+    q.git('push', 'origin', 'claude/test')
+    q.git('checkout', 'main')
+    assert q.collect() == 0
+    state = q.xq.state(q.repo)['a']
+    assert state['head'] == head
+    assert state['report']['head'] == head[:12]
+    q.git('merge', '--no-ff', 'claude/test', '-m', 'integrate fixture delivery')
+    assert q.collect() == 0
+    before = q.xq.events(q.repo)
+    q.publish({'a': report}, implementations=False)
+    capsys.readouterr()
+    assert q.collect() == 1
+    assert 'recorded delivery head is no longer on claude/test' in capsys.readouterr().out
+    assert q.xq.events(q.repo) == before
+
+
+def test_cloud_collect_uses_pinned_origin_after_local_main_falls_behind(q):
+    q.git('checkout', '-b', 'brief-update')
+    (q.repo / 'fixture-base').write_text('next base', encoding='utf-8')
+    q.git('add', 'fixture-base')
+    q.git('commit', '-m', 'advance remote base')
+    pinned = q.git('rev-parse', 'HEAD')
+    q.git('push', 'origin', 'HEAD:main')
+    q.git('checkout', 'main')
+    assert q.git('rev-parse', 'HEAD') == q.base
+    assert q.envelope('a') == 0
+    assert q.xq.state(q.repo)['a']['base'] == pinned
+    council_publish(q, {'a': {'base': pinned}}, start=pinned)
+    assert q.collect() == 0
+
+
+@pytest.mark.parametrize('missing_peer', [False, True])
+def test_cloud_collect_reserves_deliveries_only_for_eligible_batches(q, capsys, missing_peer):
+    assert q.envelope(*(['a', 'local'] if missing_peer else ['a'])) == 0
+    assert q.envelope('b') == 0
+    q.git('checkout', '-B', 'claude/test', q.base)
+    (q.repo / 'fixture-task').write_text('result', encoding='utf-8')
+    q.git('add', 'fixture-task')
+    q.git('commit', '-m', 'implement a and b')
+    head = q.git('rev-parse', 'HEAD')
+    for tid, branch in [('a', 'claude/test'), ('b', 'claude/second')]:
+        q.git('checkout', '-B', branch, head)
+        status_file = q.repo / '.agents/cloud-status' / (tid + '.json')
+        status_file.parent.mkdir(parents=True)
+        status_file.write_text(json.dumps(q.report(tid, head=head, branch=branch)), encoding='utf-8')
+        q.git('add', status_file)
+        q.git('commit', '-m', 'fixture status')
+        q.git('push', 'origin', branch)
+    q.git('checkout', 'main')
+    if missing_peer:
+        assert q.cli('cloud-collect', '--discover') == 1
+        assert 'MISSING local' in capsys.readouterr().out
+        states = q.xq.state(q.repo)
+        assert states['a']['status'] == 'running'
+        assert states['b']['status'] == 'done'
+        return
+    assert q.collect() == 0
+    capsys.readouterr()
+    assert q.cli('cloud-collect', '--branch', 'claude/second') == 1
+    assert 'done head is already recorded for a' in capsys.readouterr().out
+    assert q.xq.state(q.repo)['b']['status'] == 'running'

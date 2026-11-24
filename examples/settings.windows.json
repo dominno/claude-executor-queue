@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"$HOME/.claude/skills/executor-queue/scripts/xq.py\"; [ -f \"$f\" ] || exit 0; exec py -3 \"$f\" hook"
+            "shell": "bash",
+            "command": "[ -n \"$CLAUDE_PROJECT_DIR\" ] || exit 0; f=\"$CLAUDE_PROJECT_DIR/.claude/skills/executor-queue/scripts/xq.py\"; [ -f \"$f\" ] || exit 0; exec py -3 \"$f\" hook"
           }
         ]
       }
