@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566"
+     role="img" aria-labelledby="architecture-title architecture-description" xml:lang="en">
+  <title id="architecture-title">How executor-queue fits together</title>
+  <desc id="architecture-description">You authorize work with /executor-queue in Claude Code. The skill coordinates Codex, agy-bridge, and Claude Code on the web. It uses xq.py to read and record evidence in a local ledger shared by Git worktrees. Git tracks selected briefs and status files separately.</desc>
+  <defs>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"
+            markerUnits="userSpaceOnUse">
+      <path d="M1 1l5 3-5 3" fill="none" stroke="#245BD6" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="8" markerHeight="8" refX="6" refY="4"
+            orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M1 1l5 3-5 3" fill="none" stroke="#613E9B" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="878" height="564" rx="22" fill="#F3F6FB" stroke="#D6DFED" stroke-width="2"/>
+
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="2">
+    <path d="M440 144v23" stroke="#245BD6" marker-end="url(#arrow-blue)"/>
+    <path d="M440 256v20M231 276h418" stroke="#245BD6"/>
+    <path d="M231 276v20" stroke="#245BD6" marker-end="url(#arrow-blue)"/>
+    <path d="M649 276v20" stroke="#245BD6" marker-end="url(#arrow-blue)"/>
+    <path d="M649 404v17" stroke="#613E9B" marker-start="url(#arrow-violet)"
+          marker-end="url(#arrow-violet)"/>
+  </g>
+
+  <g fill="#FFFFFF" stroke="#D6DFED">
+    <rect x="210" y="78" width="460" height="66" rx="14"/>
+    <rect x="210" y="174" width="460" height="82" rx="14"/>
+    <rect x="38" y="304" width="386" height="94" rx="14"/>
+    <rect x="456" y="304" width="386" height="94" rx="14"/>
+    <rect x="456" y="427" width="386" height="82" rx="14"/>
+  </g>
+  <g font-family="Segoe UI, Arial, sans-serif">
+    <text x="38" y="55" fill="#142438" font-size="32" font-weight="700">How executor-queue fits together</text>
+    <g font-size="20" font-weight="700">
+      <text x="234" y="105" fill="#142438">You authorize the work</text>
+      <text x="234" y="207" fill="#245BD6">executor-queue skill</text>
+      <text x="60" y="336" fill="#096B5E">Executor tools</text>
+      <text x="478" y="336" fill="#613E9B">xq.py helper</text>
+      <text x="478" y="460" fill="#613E9B">.agents/ledger.jsonl</text>
+    </g>
+    <g fill="#435570" font-size="16">
+      <text x="234" y="128">Invoke /executor-queue in Claude Code.</text>
+      <text x="234" y="232">Coordinates delegated work and verification.</text>
+      <text x="60" y="360">Codex and agy-bridge · installed separately</text>
+      <text x="60" y="382">Claude Code on the web · connected repository</text>
+      <text x="478" y="365">Reads and records workflow evidence.</text>
+      <text x="478" y="485">Local ledger shared by Git worktrees.</text>
+      <text x="38" y="540">Track briefs and status reports in Git for web sessions.</text>
+    </g>
+  </g>
+</svg>

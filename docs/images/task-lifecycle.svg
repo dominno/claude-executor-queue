@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566" role="img" aria-labelledby="lifecycle-title lifecycle-desc" xml:lang="en">
+  <title id="lifecycle-title">From request to reviewed result</title>
+  <desc id="lifecycle-desc">Authorize the task scope and write a brief. Start the selected executor separately and record its assignment in the required order. Queued work awaits dispatch. Import or record the actual outcome. Review the delivery independently, record verification, and integrate code only with authorization.</desc>
+
+  <rect x="1" y="1" width="878" height="564" rx="23" fill="#F3F6FB" stroke="#D6DFED" stroke-width="2"/>
+
+  <g fill="none" stroke="#A8B8D0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M69 164v57m-5-5 5 5 5-5"/>
+    <path d="M69 276v57m-5-5 5 5 5-5"/>
+    <path d="M69 388v57m-5-5 5 5 5-5"/>
+  </g>
+
+  <g fill="#FFFFFF" stroke="#D6DFED" stroke-width="1.5" aria-hidden="true">
+    <rect x="112" y="92" width="727" height="100" rx="16"/>
+    <rect x="112" y="204" width="727" height="100" rx="16"/>
+    <rect x="112" y="316" width="727" height="100" rx="16"/>
+    <rect x="112" y="428" width="727" height="100" rx="16"/>
+  </g>
+
+  <g fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <g transform="translate(69 142)" stroke="#245BD6">
+      <circle r="24" fill="#EAF0FF"/>
+      <path d="M-8-12h10l6 6v18H-8zM2-12v6h6M-4 2h8M-4 6h5"/>
+    </g>
+    <g transform="translate(69 254)" stroke="#245BD6">
+      <circle r="24" fill="#EAF0FF"/>
+      <path d="M-1-10h-9v20h9M-4 0h15m-5-5 5 5-5 5"/>
+    </g>
+    <g transform="translate(69 366)" stroke="#096B5E">
+      <circle r="24" fill="#E5F4F0"/>
+      <path d="M0-11V3m-5-5 5 5 5-5M-10 2v8h20V2"/>
+    </g>
+    <g transform="translate(69 478)" stroke="#613E9B">
+      <circle r="24" fill="#F0EAFB"/>
+      <path d="M0-12 9-8v7c0 5-4 9-9 12-5-3-9-7-9-12v-7zM-4-1l3 3 5-5"/>
+    </g>
+  </g>
+
+  <g font-family="'Segoe UI', Arial, sans-serif">
+    <text x="41" y="61" fill="#142438" font-size="32" font-weight="700">From request to reviewed result</text>
+
+    <g fill="#142438" font-size="21" font-weight="700">
+      <text x="137" y="124">Authorize the scope</text>
+      <text x="137" y="236">Dispatch and record the assignment</text>
+      <text x="137" y="348">Record the actual result</text>
+      <text x="137" y="460">Review and verify independently</text>
+    </g>
+
+    <g fill="#435570" font-size="17">
+      <text x="137" y="151">Agree on the executor, files, limits, and checks.</text>
+      <text x="137" y="173">Put those decisions in a task brief.</text>
+
+      <text x="137" y="263">Start the executor separately and follow its assignment order.</text>
+      <text x="137" y="285"><tspan fill="#245BD6" font-weight="700">Queued</tspan> means the task is waiting for dispatch.</text>
+
+      <text x="137" y="375">Import the result with <tspan fill="#096B5E" font-weight="700">poll</tspan>, <tspan fill="#096B5E" font-weight="700">agy-sync</tspan>, or <tspan fill="#096B5E" font-weight="700">cloud-collect</tspan>.</text>
+      <text x="137" y="397">Use <tspan fill="#096B5E" font-weight="700">finish</tspan> to record a result manually.</text>
+
+      <text x="137" y="487">Inspect the delivery and record the verdict with <tspan fill="#613E9B" font-weight="700">verify</tspan>.</text>
+      <text x="137" y="509"><tspan fill="#613E9B" font-weight="700">Optional integration</tspan> requires user authorization.</text>
+    </g>
+  </g>
+</svg>

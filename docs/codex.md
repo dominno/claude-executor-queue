@@ -1,6 +1,6 @@
 # Codex setup and local task recipes
 
-Set the `xq` path using the [quickstart](../README.md#quickstart-in-a-new-project).
+Set the `xq` path before using these commands. [Set up the CLI](installation.md#run-xq-directly)
 The recipes use `xq.py` as shorthand for `python3 "$xq"`. The shell examples use
 POSIX syntax. On Windows run those examples in Git Bash and use `py -3 "$xq"` or
 your available Python 3.8+ command. In PowerShell, call the helper directly with

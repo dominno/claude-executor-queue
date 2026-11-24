@@ -26,7 +26,7 @@ On Windows confirm Git Bash can run `py -3 --version`. If it uses `python` or
 `python3`, confirm that command reports Python 3.8+ and replace `exec py -3` in
 the snippet with `exec python` or `exec python3`. Leave the command in Bash syntax
 even when you use PowerShell to install the skill. Follow the
-[PowerShell quickstart](../README.md#quickstart-in-a-new-project) for direct calls.
+[PowerShell commands](../docs/installation.md#run-xq-directly) for direct calls.
 The agy bridge requires macOS or Linux.
 
 If the backlog is empty, pause or review the configuration.
