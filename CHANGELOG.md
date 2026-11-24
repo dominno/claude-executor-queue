@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.3 — 3.3.0 — 2026-11-24
+
+- Package the Claude Code skill for `npx skills add` at project and user scope, under the MIT license.
+- Resolve the helper from the loaded skill and require explicit user invocation in Claude Code.
+- Align setup and queue handling with the current `claude-agy-bridge` plugin.
+- Preserve the prior offline installation if publication fails and harden ledger reconciliation.
+
 ## v3.2 — 3.2.0 — 2026-11-13
 
 - Label local HEAD fallback and require an explicit main branch for merge/cloud commands without origin/HEAD.

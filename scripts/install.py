@@ -11,8 +11,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / 'skill/executor-queue'
-PAYLOAD = ('SKILL.md', 'scripts/xq.py')
+SOURCE = ROOT / 'skills/executor-queue'
+PAYLOAD = ('LICENSE', 'SKILL.md', 'scripts/xq.py')
 
 
 def hashes(folder):
@@ -101,25 +101,40 @@ def main():
     skills.mkdir(parents=True, exist_ok=True)
     # Stage the complete payload, then swap with atomic renames.
     # Portable directory replacement needs two renames; guarded hooks tolerate
-    # the brief gap. Keep the old tree until publication succeeds for rollback.
-    with tempfile.TemporaryDirectory(prefix='.executor-queue-', dir=str(skills)) as stage:
-        staged = Path(stage) / 'executor-queue'
+    # the brief gap. Keep the old tree until the payload and receipt are published.
+    stage = Path(tempfile.mkdtemp(prefix='.executor-queue-', dir=str(skills)))
+    backup = stage / 'previous'
+    committed = False
+    try:
+        staged = stage / 'executor-queue'
         (staged / 'scripts').mkdir(parents=True)
         for name in PAYLOAD:
             shutil.copy2(str(SOURCE / name), str(staged / name))
         (staged / 'scripts/xq.py').chmod(0o755)
-        staged_receipt = Path(stage) / 'receipt.json'
-        staged_receipt.write_text(json.dumps({'schema': 1, 'version': version, 'hashes': expected}, indent=2) + '\n', encoding='utf-8')
-        backup = Path(stage) / 'previous'
+        staged_receipt = stage / 'receipt.json'
+        data = {'schema': 1, 'version': version, 'hashes': expected}
+        staged_receipt.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
         if target.exists():
             os.replace(str(target), str(backup))
         try:
             os.replace(str(staged), str(target))
+            os.replace(str(staged_receipt), str(receipt))
         except OSError:
-            if backup.exists():
-                os.replace(str(backup), str(target))
+            try:
+                if not staged.exists():
+                    os.replace(str(target), str(staged))
+                if backup.exists():
+                    os.replace(str(backup), str(target))
+            except OSError as exc:
+                if backup.exists():
+                    raise OSError('rollback failed; previous installation saved at {} ({})'.format(
+                        backup, exc)) from exc
+                raise
             raise
-        os.replace(str(staged_receipt), str(receipt))
+        committed = True
+    finally:
+        if committed or not backup.exists():
+            shutil.rmtree(str(stage))
     print('installed executor-queue')
     return 0
 

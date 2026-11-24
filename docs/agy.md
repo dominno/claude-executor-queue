@@ -1,6 +1,7 @@
 # agy review recipes
 
-Use `xq.py init`, then `xq.py doctor --need agy`; see `codex.md` for plugin setup details.
+Run `xq.py init`, then `xq.py doctor --need agy`. The bridge requires Python 3.9+ on macOS or Linux.
+See the [plugin setup instructions](codex.md#setup).
 `xq.py` means the installed helper; `$root` is the absolute primary checkout,
 `$wt` its review worktree and `$base` the explicitly selected base branch.
 
@@ -8,10 +9,8 @@ Use `xq.py init`, then `xq.py doctor --need agy`; see `codex.md` for plugin setu
 Use the resolved `"$AGYB"` in every CLI invocation. Start with `/agy:dry-run` and read the manifest for **each new file set**.
 Immediately before each delegate or queue run, run `xq.py preflight --executor agy` and proceed only on exit 0.
 Run preflight before recording a running assignment, so the new task does not consume its own last slot.
-After preflight, before delegate or queue add, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`
-(a queued assignment can be promoted after its matching pending job exists). Existing bridge names/artifacts refuse assignment; use a new id.
-For a single review: `"$AGYB" delegate --repo "$root" --file A --file B --out "$root/.agy-bridge/results/<id>.md" --cite -- '<task>'`.
-Capture the delegate's exit code immediately, even when it fails:
+For a single review, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`
+after preflight and before running `delegate`. Use a fresh ID. Capture the delegate's exit code immediately, even when it fails.
 ```sh
 xq.py preflight --executor agy || exit $?
 # Record the running assignment here, after preflight and before delegate.
@@ -23,7 +22,10 @@ Use an absolute `--out` for both commands. A failed delegate can leave no result
 a plain successful answer may lack bridge metadata. Ordinary sync cannot infer either outcome.
 The explicit exit records done for 0 (requires a result file), failed otherwise (file may be absent),
 without verification. Inspect the actual answer/failure, then independently verify or request a fresh review.
-agy cannot search unseen files. No confidential data, `.env`, credentials, `.claude/` or user media.
+Delegate `--cite` annotates citations. Adding `--require-verified` makes unverified citations return exit 17.
+The bridge stages the approved manifest. Run agy in a trusted environment because
+staging does not isolate the process from the host. Exclude confidential data,
+`.env`, credentials, `.claude/` and user media from the task and its inputs.
 
 The bridge refuses worktree roots and out-of-repo inputs. For worktree review, export a diff inside the primary repo:
 ```sh
@@ -37,22 +39,31 @@ Inspect the diff locally, including newly created files. Binary files need expli
 ignored files are omitted and need separate inspection if in scope. `add -N` records intent only in this worktree.
 Review exports are local and git-excluded automatically.
 
-On Windows PowerShell doctor prints `$AGYB='...'` with escaped quotes. Use
-`py -3 "$AGYB" queue --help` (and `py -3 "$AGYB"` before the commands below), since
-an extensionless Python bridge is not a native executable. Doctor resolves the full agy/agy.cmd path.
+## Queued reviews
 
 Queue job schema (name must equal xq id and be unique across pending/archive/results):
 ```json
 {"name":"review-01","task":"Check these sources","files":["src/parser.py","tests/parser.py"],"model":"gemini-3.8-flash-low","timeout":"5m","cite":true,"context":false,"need":false}
 ```
 `name`, `task`, `files` are required; other fields are optional. Omit model to use agy's default.
-`files` are explicit repo-relative regular paths, no globs, traversal or symlink components. `context` defaults to true
-and silently adds configured `context_files`: set false for a bounded manifest. `need` stays false without explicit
-permission to send additional files. Unknown fields refuse; exit 1 = usage/job error, 4 = rule/path/lock refusal.
-Use `assign --queued` and `"$AGYB" queue add job.json --repo "$root"` for backlog.
-Before `"$AGYB" queue run --repo "$root"`, run preflight, promote only the item about to run, then run the queue once.
-Keep each run within the preflight capacity; do not let an unbounded queue launch a new batch without another check.
-`queue watch` is allowed only on the user's explicit request; never start it to silence a hook.
+`files` takes explicit repo-relative regular paths. Globs, traversal and symlink components are refused.
+Set `context: false` for the exact manifest above. By default, a job also sends the bridge's configured
+`context_files`. Leave `need: false` unless the user has specifically authorized additional files requested
+by the model. Queue runs annotate citations for every job. With `cite: true`, unverified citations mean
+exit 17. Unknown fields or invalid jobs yield exit 1, while rule, path or lock refusals yield exit 4.
+
+1. Use `assign --queued` and `"$AGYB" queue add job.json --repo "$root"` to stage each job. Use the bridge's
+   default queue and result directories so xq can reconcile the artifacts.
+2. Inspect the entire pending set in `.agy-bridge/queue/`. Confirm that every `.job` matches a current xq
+   assignment, an inspected manifest and the user's authorization. Coordinate with other producers to keep
+   the set stable through launch. If an unrelated job is pending, use `delegate` for an independent review.
+3. Run preflight, check that the batch fits the available xq capacity, promote every matching assignment and
+   then run `"$AGYB" queue run --repo "$root"`. The bridge processes all pending jobs in filename order.
+   xq assignment status has no effect on job selection.
+
+The bounded xq flow uses `queue run`. A `queue watch` waits for newly added jobs and can start them without a
+fresh xq preflight. Start a watcher only when the user has explicitly requested continuous processing and
+every job admitted to that queue will be explicitly authorized.
 
 Read the result header first: nonempty FILES NOT SENT or exit 15/16/17 means reject or a newly authorized rerun.
 VERIFIED means only that a citation exists in an input, not that the conclusion is true. `xq.py agy-sync` reads

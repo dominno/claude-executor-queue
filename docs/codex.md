@@ -1,7 +1,8 @@
 # Codex setup and local task recipes
 
-These optional recipes expand the installed skill. `xq.py` below means the installed
-`~/.claude/skills/executor-queue/scripts/xq.py`; on Windows use `py -3` and the user profile path.
+These optional recipes expand the installed skill. Run `xq.py` with Python from
+the skill's installation directory under `.claude/skills/executor-queue/` in the
+project or the user profile. On Windows use `py -3` or your Python 3.8+ command.
 
 ## Setup
 
@@ -9,20 +10,22 @@ Run `xq.py doctor --need codex,agy,cloud`, selecting only the executors needed. 
 Git >= 2.31 is required by the primary-checkout recipe (`--path-format`); doctor reports the version and warns below 2.31.
 It checks HEAD, the default branch, Node/auth, plugin capabilities, ignores and (for cloud only) origin.
 It prints shell assignments `CC=...` and `AGYB=...`; use those exact resolved paths, never an unquoted multi-version glob.
-Resolution prefers installed_plugins.json `installPath`, falling back to version sorting in the plugin cache.
+For each supported marketplace, resolution prefers `installed_plugins.json` and falls back to its cache.
+The legacy `agy@agy-bridge-local` is checked after `agy@agy-bridge`. If `CLAUDE_CONFIG_DIR` is set,
+doctor looks under that profile.
 
 - Codex: `npm install -g @openai/codex`, `codex login` (or `codex login --device-auth`), then
   `/plugin marketplace add openai/codex-plugin-cc`, `/plugin install codex@openai-codex`, `/codex:setup`.
-- agy CLI: follow https://antigravity.google/docs/cli-using; check `agy --version`, log in on the first interactive
-  run, then `agy models`. Do not pip-install unofficial scripts. agy-bridge exit 11 means missing login.
-- agy plugin: `/plugin marketplace add https://github.com/dominno/claude-agy-bridge`,
-  `/plugin install agy@agy-bridge-local`. Fallback: `git clone <source> <clone>`, then
-  `/plugin marketplace add <clone>` or `claude --plugin-dir <clone>`. First installation is a trial; check doctor again.
-  Minimum capability is **both** `queue --help` and `verdict --help`. Version 0.1.0 was shipped with different
-  capabilities, so no reliable numeric minimum is established: require those probes even after updating.
-  If missing: `/plugin update agy@agy-bridge-local`, or use only `/agy:delegate` without queue/verdict.
-  Cache fallback in a shell with GNU version sort:
-  `AGYB=$(ls -d ~/.claude/plugins/cache/*/agy/*/bin/agy-bridge | sort -V | tail -1)`.
+- agy CLI: follow [Google's installation instructions](https://antigravity.google/docs/cli-using).
+  Check `agy --version`, sign in on the first interactive run, then run `agy models`. agy-bridge exit 11 means
+  missing login. The bridge requires Python 3.9+ on macOS or Linux.
+- agy plugin: run `/plugin marketplace add dominno/claude-agy-bridge` and `/plugin install agy@agy-bridge`.
+  For a local clone, run `/plugin marketplace add <clone>` and the same install command. For a one-session trial,
+  start `claude --plugin-dir <clone>` and invoke the bridge directly as `<clone>/bin/agy-bridge` in shell commands.
+  Doctor discovers installed copies through the plugin registry and cache, so use the marketplace install for
+  automatic discovery. Rerun doctor after installation.
+  Queue integration requires **both** `queue --help` and `verdict --help` to succeed. Those probes distinguish
+  builds that share a version number. If either fails, run `/plugin update agy@agy-bridge` and rerun doctor.
 
 Installation or authentication is a user action; do not change shell profiles or install with elevated rights.
 
@@ -108,6 +111,8 @@ The Stop hook prints refusal reasons instead of demanding work from an idle exec
 verification and stale-work checks still apply. Both preflight and hook are read-only
 and take no ledger lock. This is a point-in-time check, not a slot reservation; the lead
 must serialize launch decisions across sessions to avoid simultaneous-launch races.
+The bridge drains all pending jobs when `queue run` starts. Confirm the whole pending set before launch.
+See the [agy review recipe](agy.md#queued-reviews).
 
 Counts use `max(ledger running tasks, matched live OS processes)` separately for each
 kind, including closed tasks still marked running. OS counts are global, across repos.

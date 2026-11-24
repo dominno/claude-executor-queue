@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'skill/executor-queue/scripts/xq.py'
+SCRIPT = Path(__file__).resolve().parents[1] / 'skills/executor-queue/scripts/xq.py'
 
 
 @pytest.fixture
@@ -244,7 +244,9 @@ def test_cloud_envelope_pins_base_and_records_each_task(queue, capsys):
     assert '.agents/cloud-status/<task>.json' in output.out
     # Critic items 11, 12 and 17: v2 expands these rules into separate clauses.
     for rule in ('never push main.', 'Do not open PRs or push other branches.',
-                 'Never use secrets, network services or paid APIs;'):
+                 'only if the user authorized this batch',
+                 'Before pushing, inspect all outgoing commits',
+                 'Limit network access to authorized Git operations on that origin.'):
         assert rule in output.out
     assert 'recorded 2 assign events' in output.err
     rows = q.xq.events(q.repo)
