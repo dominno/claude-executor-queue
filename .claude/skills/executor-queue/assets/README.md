@@ -5,7 +5,7 @@ relative to the skill directory (`.claude/skills/executor-queue` or `.agents/ski
 
 - `codex-task.md`: copy to `.agents/briefs/<id>.md`, check it with `xq.py brief-lint --brief <path>` (it passes
   as shipped: one `Result:` line and a final `## Acceptance` with `Files:`/`Checks:`/`Notes:`); dispatch from a fresh worktree.
-- `agy-job.json`: name must match the xq assignment. Inspect `/agy:dry-run`'s
+- `agy-job.json`: name must match the xq assignment. Inspect `agy-bridge dry-run`'s
   manifest before sending the explicitly authorized nonconfidential files to Google.
 - `cloud-batch.md`: copy to `.agents/briefs/<batch>.md`; exact `## <id>` sections
   must match `cloud-envelope --tasks`. Review all outgoing commits before each authorized push. A batch brief has

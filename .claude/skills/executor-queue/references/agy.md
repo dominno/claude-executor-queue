@@ -11,7 +11,7 @@ See the [agy-bridge setup instructions](codex.md#setup) (skill or plugin install
 (`rb=$(xq.py status --id <id> --field review_base)`, which falls back to `base`; never the moving branch).
 
 
-Use the resolved `"$AGYB"` in every CLI invocation. Start with `/agy:dry-run` and read the manifest for **each new file set**.
+Use the resolved `"$AGYB"` in every CLI invocation. Start with `"$AGYB" dry-run --repo <root> --file <path> -- '<task>'` (`/agy-bridge dry-run` in Claude Code) and read the manifest for **each new file set**.
 Immediately before each delegate or queue run, run `xq.py preflight --executor agy` and proceed only on exit 0.
 Run preflight before recording a running assignment, so the new task does not consume its own last slot.
 For a single review, record `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md`

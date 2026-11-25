@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed: docs
+- agy steps and the `doctor --need agy` hint name `agy-bridge dry-run`/`doctor` (`/agy-bridge ...` in Claude Code)
+  instead of the removed `/agy:dry-run` and `/agy:doctor` plugin commands.
+
 ### Changed: repository layout
 - Everything the skill uses now lives in one directory, `.claude/skills/executor-queue/` (`SKILL.md`, `README.md`,
   `LICENSE`, `scripts/xq.py`, `references/` for the former `docs/*.md` guides, `assets/` for the former `examples/`),

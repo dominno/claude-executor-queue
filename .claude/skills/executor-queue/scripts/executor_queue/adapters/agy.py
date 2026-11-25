@@ -116,7 +116,7 @@ AGY_INSTALL_HINT = ('npx skills add dominno/claude-agy-bridge --skill agy-bridge
 
 
 def agy_doctor_checks(root, a, check, settings):
-    """doctor --need agy: the agy-bridge plugin, its doctor and features, and the .agy-bridge ignore."""
+    """doctor --need agy: the agy-bridge skill or plugin, its doctor and features, and the .agy-bridge ignore."""
     if util.WINDOWS:
         check('agy platform', False, 'unsupported on Windows',
               'agy-bridge supports macOS and Linux; run the bridge in a supported environment')
@@ -135,7 +135,7 @@ def agy_doctor_checks(root, a, check, settings):
                      if a.offline else 'Python, CLI version and model access in the bridge environment')
             check('agy-bridge doctor', probe.returncode == 0,
                   scope if probe.returncode == 0 else '{}: bridge doctor exited {}'.format(scope, probe.returncode),
-                  'see /agy:doctor and the bridge output below')
+                  'see the agy-bridge doctor output below (/agy-bridge doctor)')
             if probe.stdout.strip():
                 print(probe.stdout.rstrip())
             for feature in ('queue', 'verdict'):

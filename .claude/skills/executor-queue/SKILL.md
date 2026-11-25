@@ -63,7 +63,7 @@ See [Codex setup and cleanup](references/codex.md).
 ## agy
 
 Files sent to agy go to Google. Use authorized nonconfidential files, excluding secrets, `.env`, credentials, `.claude/` and user media. Set `root` to the absolute primary checkout.
-Run `/agy:dry-run` and inspect the manifest for every new file set. Staging the manifest does not isolate agy from its host.
+Run `"${AGYB:?}" dry-run --repo "${root:?}" --file A -- '<task>'` and inspect the manifest for every new file set. Staging the manifest does not isolate agy from its host.
 Run `xq.py preflight --executor agy` immediately before every agy queue run/delegate; proceed only on exit 0.
 Queue, in order: 1) `xq.py assign --id <id> --executor agy --brief .agents/briefs/<id>.md --queued`; 2) write job.json with `name` = <id>;
 3) `"${AGYB:?}" queue add job.json --repo "${root:?}" --dry-run`, then without `--dry-run`; 4) preflight; 5) promote: the same assign without `--queued`; 6) `"${AGYB:?}" queue run --repo "${root:?}"` (Bash timeout 600000 ms or run_in_background). `poll --id <id> --wait` exits 1 when a pending job has no active runner.
