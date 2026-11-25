@@ -4,7 +4,6 @@ Run: python3 -m pytest tests/test_xq_contract.py -q
 Git commits/pushes below are fixture data, confined to tmp_path and a bare file
 remote. No project refs, executor queues, user Git config, or network are used.
 """
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -14,17 +13,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from conftest import load_xq
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'skills/executor-queue/scripts/xq.py'
+
+SCRIPT = Path(__file__).resolve().parents[1] / '.claude/skills/executor-queue/scripts/xq.py'
 
 
 @pytest.fixture
 def xq():
     if not SCRIPT.is_file():
         pytest.skip(f'user-level skill is not installed at {SCRIPT}')
-    spec = importlib.util.spec_from_file_location('xq_skill_under_test', SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = load_xq()
     return module
 
 
@@ -33,9 +32,9 @@ def queue(xq, tmp_path, monkeypatch, isolated_queue_environment):
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(
+    monkeypatch.setattr(xq.module_of('resource_readings'), 'resource_readings', lambda root: dict(
         load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
-    monkeypatch.setattr(xq, 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
+    monkeypatch.setattr(xq.module_of('live_process_counts'), 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
 
     def git(*args):
         return subprocess.run(

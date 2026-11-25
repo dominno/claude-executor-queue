@@ -2,7 +2,6 @@
 Fixture approach adapted from the existing xq-tests v1 suite; tests target tracked source.
 """
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -16,7 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'skills/executor-queue/scripts/xq.py'
+from conftest import load_xq
+
+SCRIPT = Path(__file__).resolve().parents[1] / '.claude/skills/executor-queue/scripts/xq.py'
 
 
 @pytest.fixture
@@ -26,15 +27,13 @@ def q(tmp_path, monkeypatch, isolated_queue_environment):
     repo.mkdir()
     monkeypatch.chdir(repo)
     monkeypatch.setattr(sys, 'stdin', io.StringIO('{}'))
-    spec = importlib.util.spec_from_file_location('xq_under_test', SCRIPT)
-    xq = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(xq)
+    xq = load_xq()
     real_resource_readings = xq.resource_readings
     real_live_process_counts = xq.live_process_counts
-    monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(
+    monkeypatch.setattr(xq.module_of('resource_readings'), 'resource_readings', lambda root: dict(
         load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
-    monkeypatch.setattr(xq, 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
-    monkeypatch.setattr(xq, 'CODEX_RECHECK_SECONDS', 0)
+    monkeypatch.setattr(xq.module_of('live_process_counts'), 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
+    monkeypatch.setattr(xq.module_of('CODEX_RECHECK_SECONDS'), 'CODEX_RECHECK_SECONDS', 0)
 
     def git(*args):
         return subprocess.run(['git', '-c', 'commit.gpgsign=false', *args],
@@ -171,7 +170,7 @@ def test_status_json_combines_filters_and_allowlists_observations(q, monkeypatch
         assert argv == ['git', 'rev-parse', '--git-common-dir']
         return original(argv, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'run', local_only)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', local_only)
 
     assert q.cli('status', '--id', 'running-codex', '--executor', 'codex', '--state', 'running', '--json') == 0
     assert json.loads(capsys.readouterr().out) == {'schema_version': 1, 'tasks': [{
@@ -220,7 +219,7 @@ def test_hook_reuses_ledger_state_for_capacity(q, monkeypatch, capsys):
         reads.append(root)
         return read_state(root)
 
-    monkeypatch.setattr(q.xq, 'state', track_state)
+    monkeypatch.setattr(q.xq.module_of('state'), 'state', track_state)
     assert q.cli('hook') == 2
     assert 'next queued item local' in capsys.readouterr().err
     assert reads == [q.repo]
@@ -560,6 +559,52 @@ def test_plugin_resolution_respects_checkout_scope(q):
     assert q.xq.plugin_binary('codex') is None
 
 
+def install_agy_skill(base, script='import sys\nsys.exit(0)\n'):
+    launcher = base / 'agy-bridge/scripts/agy-bridge'
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    launcher.write_text('#!' + sys.executable + '\n' + script)
+    launcher.chmod(0o755)
+    return launcher
+
+
+def test_agy_skill_install_is_found_before_the_plugin_in_search_order(q):
+    plugin = q.home / '.claude/plugins/cache/agy-bridge/agy/1.0/bin/agy-bridge'
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text('')
+    assert q.xq.plugin_binary('agy') == str(plugin)
+    assert q.xq.binary_source('agy', str(plugin)) == 'Claude Code plugin'
+    order = [q.repo / '.claude/skills', q.repo / '.agents/skills',
+             q.home / '.claude/skills', q.home / '.agents/skills']
+    found = [install_agy_skill(base) for base in reversed(order)][::-1]
+    for launcher, base in zip(found, order):
+        assert q.xq.plugin_binary('agy') == str(launcher)
+        assert q.xq.binary_source('agy', str(launcher)) == 'skill ' + str(base / 'agy-bridge')
+        launcher.unlink()
+    assert q.xq.plugin_binary('agy') == str(plugin)
+
+
+def test_agy_skill_lookup_follows_the_project_and_leaves_codex_alone(q):
+    other = q.tmp_path / 'other project'
+    launcher = install_agy_skill(other / '.agents/skills')
+    assert q.xq.plugin_binary('agy') is None
+    assert q.xq.plugin_binary('agy', project=other) == str(launcher)
+    # The Codex companion is OpenAI's plugin: a same-named skill directory is never consulted.
+    stray = q.repo / '.claude/skills/codex/scripts/codex-companion.mjs'
+    stray.parent.mkdir(parents=True)
+    stray.write_text('')
+    assert q.xq.skill_binary('codex') is None and q.xq.plugin_binary('codex') is None
+
+
+def test_agy_doctor_reports_the_skill_location(q, capsys):
+    q.cli('init')
+    launcher = install_agy_skill(q.home / '.agents/skills', 'import sys\n'
+                                 'print("--detach" if "watch" in sys.argv else "")\nsys.exit(0)\n')
+    assert q.cli('doctor', '--offline', '--need', 'agy') == 0
+    out = capsys.readouterr().out
+    assert 'OK agy-bridge: {} (skill {})'.format(launcher, q.home / '.agents/skills/agy-bridge') in out
+    assert 'AGYB=' + shlex.quote(str(launcher)) in out
+
+
 @pytest.mark.parametrize('dispatch_scope', ['primary', 'linked', 'legacy'])
 def test_codex_poll_uses_dispatch_project_across_worktrees(q, monkeypatch, dispatch_scope):
     linked = q.tmp_path / 'linked checkout'
@@ -594,7 +639,7 @@ def test_codex_poll_uses_dispatch_project_across_worktrees(q, monkeypatch, dispa
             return subprocess.CompletedProcess(argv, 0, output, '')
         return original(argv, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'run', fake_run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_run)
     monkeypatch.chdir(other)
     assert q.cli('poll') == 0
     assert q.xq.state(q.repo)['local']['status'] == 'done'
@@ -618,10 +663,10 @@ def test_doctor_agyb_cache_capabilities_and_cloud_requirements(q, capsys):
 @pytest.mark.parametrize('windows,bridge_exit', [(False, 0), (False, 14), (True, 0)])
 def test_agy_doctor_uses_bridge_diagnostics(q, monkeypatch, capsys, windows, bridge_exit):
     q.cli('init')
-    monkeypatch.setattr(q.xq, 'WINDOWS', windows)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', windows)
     bridge = str(q.home / 'bin/agy-bridge')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args: bridge)
-    monkeypatch.setattr(q.xq, 'bridge_command', lambda path: [path])
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda *args: bridge)
+    monkeypatch.setattr(q.xq.module_of('bridge_command'), 'bridge_command', lambda path: [path])
     original = q.xq.run
     calls = []
 
@@ -635,7 +680,7 @@ def test_agy_doctor_uses_bridge_diagnostics(q, monkeypatch, capsys, windows, bri
             return subprocess.CompletedProcess(argv, bridge_exit, detail, '')
         return subprocess.CompletedProcess(argv, 0, '  --detach' if 'watch' in argv else '', '')
 
-    monkeypatch.setattr(q.xq, 'run', run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', run)
     assert q.cli('doctor', '--need', 'agy') == (1 if windows or bridge_exit else 0)
     output = capsys.readouterr().out
     if windows:
@@ -651,11 +696,11 @@ def test_agy_doctor_uses_bridge_diagnostics(q, monkeypatch, capsys, windows, bri
 @pytest.mark.parametrize('bridge_exit', [0, 14])
 def test_doctor_offline_skips_executor_auth(q, monkeypatch, capsys, bridge_exit):
     q.cli('init')
-    monkeypatch.setattr(q.xq, 'WINDOWS', False)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', False)
     bridge = str(q.home / 'bin/agy-bridge')
     companion = str(q.home / 'scripts/codex-companion.mjs')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, *args, **kwargs: {'agy': bridge, 'codex': companion}[kind])
-    monkeypatch.setattr(q.xq, 'bridge_command', lambda path: [path])
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, *args, **kwargs: {'agy': bridge, 'codex': companion}[kind])
+    monkeypatch.setattr(q.xq.module_of('bridge_command'), 'bridge_command', lambda path: [path])
     monkeypatch.setattr(q.xq.shutil, 'which', lambda name: str(q.home / 'bin' / name))
     original = q.xq.run
     calls = []
@@ -671,7 +716,7 @@ def test_doctor_offline_skips_executor_auth(q, monkeypatch, capsys, bridge_exit)
         return subprocess.CompletedProcess(argv, bridge_exit if argv[1] == 'doctor' else 0,
                                            '--detach' if 'watch' in argv else '', '')
 
-    monkeypatch.setattr(q.xq, 'run', run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', run)
     assert q.cli('doctor', '--need', 'codex,agy,cloud', '--offline') == (1 if bridge_exit else 0)
     assert calls == [['doctor', '--repo', str(q.repo), '--offline'], ['queue', '--help'], ['verdict', '--help'],
                      ['queue', 'cancel', '--help'], ['queue', 'watch', '--help']]
@@ -836,7 +881,7 @@ def test_poll_scope_keeps_other_registered_work_offline(q, monkeypatch):
     q.assign('local', 'codex', '--job', 'first', '--worktree', str(q.repo))
     q.assign('second', 'codex', '--job', 'second', '--worktree', str(q.repo))
     q.assign('review', 'agy')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'companion')
     calls = []
     agy_calls = []
     original = q.xq.run
@@ -854,8 +899,8 @@ def test_poll_scope_keeps_other_registered_work_offline(q, monkeypatch):
         agy_calls.append((task_id, observe_incomplete))
         return 0
 
-    monkeypatch.setattr(q.xq, 'run', fake_run)
-    monkeypatch.setattr(q.xq, 'sync_agy', fake_agy)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_run)
+    monkeypatch.setattr(q.xq.module_of('sync_agy'), 'sync_agy', fake_agy)
     assert q.cli('poll', '--id', 'local', '--executor', 'codex') == 0
     assert calls == [('status', 'first')] and agy_calls == []
     assert 'observation' not in q.xq.state(q.repo)['second']
@@ -875,7 +920,7 @@ def test_poll_refuses_unknown_mismatched_and_cloud_ids(q, monkeypatch):
     q.assign()
     q.xq.append(q.repo, dict(event='assign', id='cloud-task', executor='cloud'))
     before = q.xq.events(q.repo)
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
     with pytest.raises(SystemExit, match='invalid task id'):
         q.cli('poll', '--id', '')
     with pytest.raises(SystemExit, match='unknown task missing'):
@@ -896,7 +941,7 @@ def test_poll_refuses_unknown_mismatched_and_cloud_ids(q, monkeypatch):
 def test_scoped_codex_poll_problem_records_observation_without_heartbeat(q, monkeypatch, status_rc,
                                                                          status_payload, observed):
     q.assign('local', 'codex', '--job', 'job', '--worktree', str(q.repo))
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'companion')
     original = q.xq.run
 
     def fake_run(argv, **kwargs):
@@ -907,7 +952,7 @@ def test_scoped_codex_poll_problem_records_observation_without_heartbeat(q, monk
         assert observed == 'done' and argv[2] == 'result'
         return subprocess.CompletedProcess(argv, 1, '', 'not available')
 
-    monkeypatch.setattr(q.xq, 'run', fake_run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_run)
     assert q.cli('poll', '--id', 'local') == 1
     task = q.xq.state(q.repo)['local']
     assert task['status'] == 'running' and 'seen' not in task and 'finished' not in task
@@ -923,7 +968,7 @@ def test_scoped_codex_poll_refuses_foreign_worktree_before_plugin_lookup(q, monk
         q.assign('local', 'codex', '--job', 'job', '--worktree', str(foreign))
     # A legacy row recorded before assign checked the worktree.
     q.xq.append(q.repo, dict(event='assign', id='local', executor='codex', job='job', worktree=str(foreign)))
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda *args, **kwargs: pytest.fail('no companion lookup expected'))
     assert q.cli('poll', '--executor', 'codex', '--id', 'local') == 1
     task = q.xq.state(q.repo)['local']
     assert task['status'] == 'running' and 'seen' not in task
@@ -948,21 +993,25 @@ def test_envelope_duplicate_atomic_and_reprint_without_fetch(q, monkeypatch):
         q.envelope('b', 'a')
     assert q.xq.events(q.repo) == before
     q.git('remote', 'remove', 'origin')
-    monkeypatch.setattr(q.xq, 'fetch_branch', lambda *args: pytest.fail('reprint must not fetch'))
+    monkeypatch.setattr(q.xq.module_of('fetch_branch'), 'fetch_branch', lambda *args: pytest.fail('reprint must not fetch'))
     assert q.envelope('a', **{'--reprint': True}) == 0
 
 
 def test_python38_syntax_and_stdlib():
     import ast
-    tree = ast.parse(SCRIPT.read_text(encoding='utf-8'), feature_version=(3, 8))
+    sources = sorted(SCRIPT.parent.rglob('*.py'))
+    assert SCRIPT in sources and len(sources) > 1
+    # Stdlib only; the one non-stdlib name is the skill's own package (relative imports inside it).
     allowed = {'argparse', 'contextlib', 'copy', 'datetime', 'fcntl', 'functools', 'glob', 'hashlib',
                'fnmatch', 'json', 'math', 'msvcrt', 'os', 'pathlib', 're', 'shlex', 'shutil', 'stat',
-               'subprocess', 'sys', 'tempfile', 'threading', 'time'}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            assert all(n.name.split('.')[0] in allowed for n in node.names)
-        if isinstance(node, ast.ImportFrom):
-            assert node.module.split('.')[0] in allowed
+               'subprocess', 'sys', 'tempfile', 'threading', 'time', 'executor_queue'}
+    for source in sources:
+        tree = ast.parse(source.read_text(encoding='utf-8'), feature_version=(3, 8))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                assert all(n.name.split('.')[0] in allowed for n in node.names), source
+            if isinstance(node, ast.ImportFrom) and not node.level:
+                assert node.module.split('.')[0] in allowed, source
 
 
 def test_agy_quota_retry_success_does_not_fail(q):
@@ -1093,7 +1142,7 @@ def test_review_06_doctor_reports_missing_default_branch(q, capsys):
 ])
 def test_review_06_doctor_checks_ignores_from_root(q, capsys, monkeypatch, need, probe):
     q.cli('init')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: '/fake/agy-bridge')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: '/fake/agy-bridge')
     monkeypatch.setattr(q.xq.shutil, 'which', lambda name: '/fake/' + name)
     original = q.xq.run
 
@@ -1102,7 +1151,7 @@ def test_review_06_doctor_checks_ignores_from_root(q, capsys, monkeypatch, need,
             return subprocess.CompletedProcess(argv, 0, '--detach' if 'watch' in argv else '', '')
         return original(argv, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'run', fake_tools)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_tools)
     if need == 'cloud':
         with (q.repo / '.git/info/exclude').open('a') as fh:
             fh.write('/.agents/briefs/\n')
@@ -1129,7 +1178,7 @@ def test_review_07_xq_root_controls_git_from_unrelated_cwd(q, monkeypatch, capsy
             calls.append((argv, kwargs.get('cwd')))
         return original(argv, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'run', record_git)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', record_git)
     assert q.cli('init') == 0
     assert q.cli('doctor', '--need', 'cloud') == 0
     assert 'default branch: main' in capsys.readouterr().out
@@ -1192,7 +1241,7 @@ def test_review_09_collect_parses_ledger_once(q, monkeypatch, capsys, bad_report
         reads.append(root)
         return original(root)
 
-    monkeypatch.setattr(q.xq, 'events', counted_events)
+    monkeypatch.setattr(q.xq.module_of('events'), 'events', counted_events)
     capsys.readouterr()
     assert q.collect() == int(bad_report)
     assert reads == [q.repo]
@@ -1221,7 +1270,7 @@ def test_review_09_collect_caches_sensitive_history_per_base_ref(q, monkeypatch,
             diffs.append(tuple(args[-2].split('..')))
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'git', count_diffs)
+    monkeypatch.setattr(q.xq.module_of('git'), 'git', count_diffs)
     capsys.readouterr()
     assert q.cli('cloud-collect', '--discover') == 0
     assert sorted(diffs) == sorted([(q.base, reports['a']['head']),
@@ -1240,7 +1289,7 @@ def test_review_10_empty_append_does_no_io(q, monkeypatch, rows):
     def unexpected(*args, **kwargs):
         pytest.fail('empty append must not lock, open/read/write, or fsync')
 
-    monkeypatch.setattr(q.xq, 'ledger_lock', unexpected)
+    monkeypatch.setattr(q.xq.module_of('ledger_lock'), 'ledger_lock', unexpected)
     monkeypatch.setattr(Path, 'open', unexpected)
     monkeypatch.setattr(q.xq.os, 'fsync', unexpected)
     q.xq.append_many(q.repo, rows)
@@ -1282,7 +1331,7 @@ def test_review_10_append_reads_only_last_byte_and_recovers_partial_line(q, monk
         fh = original_safe_open(p, *args, **kwargs)
         return TrackedFile(fh) if p == path else fh
 
-    monkeypatch.setattr(q.xq, 'safe_open', tracked_open)
+    monkeypatch.setattr(q.xq.module_of('safe_open'), 'safe_open', tracked_open)
     q.xq.append_many(q.repo, [dict(event='finish', id='new', summary='zażółć')])
     assert reads == [1]
     assert (-1, os.SEEK_END) in seeks
@@ -1356,8 +1405,8 @@ def test_direct_assign_keeps_checks_inside_transaction(q, monkeypatch):
         assert str(root) in q.xq._LOCKED
         return read_events(root)
 
-    monkeypatch.setattr(q.xq, 'repo_root', tracked_root)
-    monkeypatch.setattr(q.xq, 'events', locked_events)
+    monkeypatch.setattr(q.xq.module_of('repo_root'), 'repo_root', tracked_root)
+    monkeypatch.setattr(q.xq.module_of('events'), 'events', locked_events)
     args = SimpleNamespace(id='local', executor='codex', brief=q.brief, note=None,
                            job=None, worktree=None, queued=True, force=False)
     assert q.xq.cmd_assign(args) == 0
@@ -1461,13 +1510,13 @@ def test_review_small_04_duplicate_merge_requires_force(q):
     assert len(q.xq.events(q.repo)) == len(before) + 1
 
 
-@pytest.mark.parametrize('source', ['skills/executor-queue/SKILL.md', 'docs/codex.md'])
+@pytest.mark.parametrize('source', ['SKILL.md', 'references/codex.md'])
 def test_review_small_05_root_snippet_resolves_primary_checkout(q, source):
     wt = q.tmp_path / 'linked worktree'
     q.git('worktree', 'add', '--detach', str(wt))
     nested = wt / 'nested'
     nested.mkdir()
-    text = (SCRIPT.parents[3] / source).read_text()
+    text = (SCRIPT.parents[1] / source).read_text()
     lines = [line.strip().strip('`') for line in text.splitlines()
              if line.strip().startswith(('root=', '`root='))]
     assert len(lines) == 1, 'provide an executable primary-checkout root assignment'
@@ -1730,9 +1779,9 @@ def test_council_09_heartbeat_ack_and_pause(q, monkeypatch):
     q.cli('ack', '--id', 'old', '--hours', '12')
     assert q.cli('hook') == 0
     q.xq.append(q.repo, dict(event='assign', id='slow', executor='codex', job='job', worktree=str(q.repo), ts='2000-01-01T00:00:00Z'))
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'companion')
     original_run = q.xq.run
-    monkeypatch.setattr(q.xq, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '{"job":{"status":"running"}}', '') if argv[0] == 'node' else original_run(argv, **kw))
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '{"job":{"status":"running"}}', '') if argv[0] == 'node' else original_run(argv, **kw))
     q.cli('poll')
     assert q.xq.state(q.repo)['slow']['seen']
     assert q.cli('hook') == 0
@@ -1778,7 +1827,7 @@ def test_closed_task_requires_explicit_reconciliation(q, monkeypatch):
 
     q.assign('running')
     q.cli('close', '--id', 'running', '--reason', 'dropped', '--force')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: None)
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: None)
     before = q.xq.events(q.repo)
     assert q.cli('poll') == 0
     assert q.xq.events(q.repo) == before
@@ -1800,7 +1849,7 @@ def test_poll_releases_closed_running_slot_only_on_terminal_evidence(q, monkeypa
     (q.repo / '.agents/config.json').write_text('{"limits":{"codex":1}}', encoding='utf-8')
     q.assign('local', 'codex', '--job', 'recorded', '--worktree', str(q.repo))
     q.cli('close', '--id', 'local', '--reason', 'dropped', '--force')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'companion')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'companion')
     real_run = q.xq.run
     status = 'running'
 
@@ -1810,7 +1859,7 @@ def test_poll_releases_closed_running_slot_only_on_terminal_evidence(q, monkeypa
         assert argv[2:4] == ['status', 'recorded']
         return subprocess.CompletedProcess(argv, 0, json.dumps({'job': {'status': status}}), '')
 
-    monkeypatch.setattr(q.xq, 'run', fake_run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_run)
     assert q.cli('poll') == 0
     assert q.cli('preflight', '--executor', 'codex') == 1
     assert '1 closed awaiting terminal evidence' in capsys.readouterr().out
@@ -1882,20 +1931,20 @@ def test_council_13_windows_lock_and_unlocked_queries(q, monkeypatch):
             raise OSError('busy')
     monkeypatch.setitem(sys.modules, 'msvcrt', SimpleNamespace(locking=locking, LK_NBLCK=2, LK_UNLCK=0))
     with monkeypatch.context() as patch:
-        patch.setattr(q.xq, 'WINDOWS', True, raising=False)
-        patch.setattr(q.xq, 'LOCK_WAIT_SECONDS', 0.1, raising=False)
+        patch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', True, raising=False)
+        patch.setattr(q.xq.module_of('LOCK_WAIT_SECONDS'), 'LOCK_WAIT_SECONDS', 0.1, raising=False)
         with q.xq.ledger_lock(q.repo):
             assert str(q.repo) in q.xq._LOCKED
     assert attempts == [2, 2, 2, 0]
     attempts.clear()
     with monkeypatch.context() as patch:
-        patch.setattr(q.xq, 'WINDOWS', True)
-        patch.setattr(q.xq, 'LOCK_WAIT_SECONDS', 0)
+        patch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', True)
+        patch.setattr(q.xq.module_of('LOCK_WAIT_SECONDS'), 'LOCK_WAIT_SECONDS', 0)
         with pytest.raises(SystemExit, match='ledger busy'):
             with q.xq.ledger_lock(q.repo):
                 pass
     q.assign('local', 'codex', '--job', 'j', '--worktree', str(q.repo))
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'cc')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'cc')
     original = q.xq.run
     def unlocked(argv, **kw):
         if argv[0] == 'node':
@@ -1904,7 +1953,7 @@ def test_council_13_windows_lock_and_unlocked_queries(q, monkeypatch):
         if argv[:2] == ['git', 'fetch']:
             assert not q.xq._LOCKED
         return original(argv, **kw)
-    monkeypatch.setattr(q.xq, 'run', unlocked)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', unlocked)
     q.cli('poll'); q.envelope('a')
     council_publish(q, {'a': {}})
     q.collect()
@@ -1924,10 +1973,10 @@ def test_council_15_agy_python_and_powershell(q, monkeypatch, capsys):
     q.cli("init")
     bridge = q.tmp_path / "a bridge's script"
     bridge.write_text('import sys\nprint("--detach" if "watch" in sys.argv else "")\nsys.exit(0)')
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: str(bridge))
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: str(bridge))
     assert q.cli('doctor', '--need', 'agy') == 0
     assert str(bridge) in capsys.readouterr().out
-    monkeypatch.setattr(q.xq, 'WINDOWS', True)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', True)
     assert q.xq.bridge_command(str(bridge)) == [sys.executable, str(bridge)]
     assert q.xq.shell_assignment('AGYB', str(bridge)).startswith("$AGYB='")
     assert "bridge''s" in q.xq.shell_assignment('AGYB', str(bridge))
@@ -2049,14 +2098,14 @@ def test_council_24_queued_agy_promotion_and_idle(q):
 
 def test_council_13_concurrent_finish_during_poll_is_preserved(q, monkeypatch):
     q.assign('local', 'codex', '--job', 'j', '--worktree', str(q.repo))
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: 'cc')
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: 'cc')
     original = q.xq.run
     def racing(argv, **kw):
         if argv[0] == 'node':
             q.xq.append(q.repo, dict(event='finish', id='local', status='failed', summary='cancelled concurrently'))
             return subprocess.CompletedProcess(argv, 0, '{"job":{"status":"running"}}', '')
         return original(argv, **kw)
-    monkeypatch.setattr(q.xq, 'run', racing)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', racing)
     with pytest.raises(SystemExit, match='ledger changed'):
         q.cli('poll')
     assert q.xq.state(q.repo)['local']['summary'] == 'cancelled concurrently'
@@ -2147,7 +2196,7 @@ def test_council_13_parallel_fetch_does_not_reuse_fetch_head(q, monkeypatch):
         if args[0] == 'fetch':
             q.git('fetch', '-q', 'origin', 'claude/test')
         return output
-    monkeypatch.setattr(q.xq, 'git', competing_fetch)
+    monkeypatch.setattr(q.xq.module_of('git'), 'git', competing_fetch)
     q.envelope()
     assert q.xq.state(q.repo)['a']['base'] == q.base
     assert not q.git('for-each-ref', '--format=%(refname)', 'refs/xq-fetch/')
@@ -2179,8 +2228,8 @@ def test_n1_local_head_fallback_requires_explicit_main(q, capsys):
 
 
 def test_n2_resume_last_session_documentation():
-    root = SCRIPT.parents[3]
-    for path in ('docs/codex.md', 'skills/executor-queue/SKILL.md'):
+    root = SCRIPT.parents[1]
+    for path in ('references/codex.md', 'SKILL.md'):
         text = (root / path).read_text()
         assert 'only within the same Claude session' in text
         assert 'launch the -fix1 brief fresh in the same worktree' in text
@@ -2265,13 +2314,13 @@ def test_n7_doctor_git_version(q, monkeypatch, capsys, version, warn):
         if argv == ['git', '--version']:
             return subprocess.CompletedProcess(argv, 0, 'git version ' + version, '')
         return real(argv, **kwargs)
-    monkeypatch.setattr(q.xq, 'run', run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', run)
     q.cli('doctor', '--need', 'cloud')
     out = capsys.readouterr().out
     assert 'git version: ' + version in out
     assert ('WARN git < 2.31' in out) == warn
-    for path in ('docs/codex.md', 'skills/executor-queue/SKILL.md'):
-        assert 'Git >= 2.31' in (SCRIPT.parents[3] / path).read_text()
+    for path in ('references/codex.md', 'SKILL.md'):
+        assert 'Git >= 2.31' in (SCRIPT.parents[1] / path).read_text()
 
 
 def test_n3_explicit_delegate_cannot_override_bridge_failure(q):
@@ -2291,8 +2340,8 @@ def test_n3_explicit_delegate_cannot_override_bridge_failure(q):
 def capacity(q, monkeypatch):
     readings = dict(load=0.5, cpus=2, repo_free_gb=10.0, temp_free_gb=10.0)
     counts = dict(codex=0, agy=0)
-    monkeypatch.setattr(q.xq, 'resource_readings', lambda root: readings, raising=False)
-    monkeypatch.setattr(q.xq, 'live_process_counts', lambda samples=None: counts, raising=False)
+    monkeypatch.setattr(q.xq.module_of('resource_readings'), 'resource_readings', lambda root: readings, raising=False)
+    monkeypatch.setattr(q.xq.module_of('live_process_counts'), 'live_process_counts', lambda samples=None: counts, raising=False)
     return readings, counts
 
 
@@ -2356,7 +2405,7 @@ def test_n9_hook_refusal_read_only_unlocked(q, capacity, monkeypatch, capsys, re
     before = {p: p.read_bytes() for p in q.repo.rglob('*') if p.is_file()}
     def no_lock(*args):
         pytest.fail('hook must stay unlocked')
-    monkeypatch.setattr(q.xq, 'ledger_lock', no_lock)
+    monkeypatch.setattr(q.xq.module_of('ledger_lock'), 'ledger_lock', no_lock)
     assert q.cli('hook') == 0
     out = capsys.readouterr().err
     assert 'preflight refused' in out and 'codex idle' not in out
@@ -2374,11 +2423,11 @@ def test_n9_hook_keeps_verification_guard(q, capacity, capsys):
 
 
 def test_n9_windows_load_fallback(q, monkeypatch, capsys):
-    monkeypatch.setattr(q.xq, 'resource_readings', q.real_resource_readings)
+    monkeypatch.setattr(q.xq.module_of('resource_readings'), 'resource_readings', q.real_resource_readings)
     # Test the actual reader while keeping disk and process probes injected.
-    monkeypatch.setattr(q.xq, 'WINDOWS', True)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', True)
     monkeypatch.setattr(q.xq.shutil, 'disk_usage', lambda path: SimpleNamespace(free=10 * 1024**3))
-    monkeypatch.setattr(q.xq, 'live_process_counts', lambda samples=None: {'codex': 0, 'agy': 0}, raising=False)
+    monkeypatch.setattr(q.xq.module_of('live_process_counts'), 'live_process_counts', lambda samples=None: {'codex': 0, 'agy': 0}, raising=False)
     def unavailable():
         pytest.fail('Windows must not call getloadavg')
     monkeypatch.setattr(q.xq.os, 'getloadavg', unavailable, raising=False)
@@ -2414,14 +2463,14 @@ def test_n9_doctor_capacity(q, capacity, capsys):
     ('codex-helper', 'codex-helper exec', None),
 ])
 def test_n9_process_matching(q, monkeypatch, name, command, expected):
-    monkeypatch.setattr(q.xq, 'process_rows', lambda: [(name, command)], raising=False)
+    monkeypatch.setattr(q.xq.module_of('process_rows'), 'process_rows', lambda: [(name, command)], raising=False)
     counts = q.real_live_process_counts()
     assert counts == {kind: int(kind == expected) for kind in ('codex', 'agy')}
 
 
 def test_n9_resource_reader_both_volumes(q, monkeypatch):
     seen = []
-    monkeypatch.setattr(q.xq, 'WINDOWS', False)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', False)
     monkeypatch.setattr(q.xq.os, 'getloadavg', lambda: (3, 2, 1), raising=False)
     monkeypatch.setattr(q.xq.os, 'cpu_count', lambda: 4)
     def disk(path):
@@ -2460,8 +2509,8 @@ def test_n9_failed_probes_refuse_and_hook_does_not_demand_work(q, capacity, monk
     q.assign('waiting', 'codex', '--queued')
     def unavailable(*args):
         raise OSError('probe failed')
-    monkeypatch.setattr(q.xq, 'resource_readings', unavailable)
-    monkeypatch.setattr(q.xq, 'live_process_counts', unavailable)
+    monkeypatch.setattr(q.xq.module_of('resource_readings'), 'resource_readings', unavailable)
+    monkeypatch.setattr(q.xq.module_of('live_process_counts'), 'live_process_counts', unavailable)
     assert q.cli('preflight', '--executor', 'codex') == 1
     assert q.cli('hook') == 0
     assert 'readings unavailable' in capsys.readouterr().err
@@ -2469,7 +2518,7 @@ def test_n9_failed_probes_refuse_and_hook_does_not_demand_work(q, capacity, monk
 
 @pytest.mark.parametrize('windows', [False, True])
 def test_n9_process_reader(q, monkeypatch, windows):
-    monkeypatch.setattr(q.xq, 'WINDOWS', windows)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', windows)
     def probe(argv, **kw):
         if windows:
             assert argv[0] == 'powershell.exe'
@@ -2479,7 +2528,7 @@ def test_n9_process_reader(q, monkeypatch, windows):
             assert kw['env']['LC_ALL'] == 'C'
             output = 'S+   /opt/bin/codex /opt/bin/codex exec task\nZ    codex <defunct>\n'
         return subprocess.CompletedProcess(argv, 0, output, '')
-    monkeypatch.setattr(q.xq, 'run', probe)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', probe)
     expected = [('codex.exe', 'codex.exe exec task')] if windows else [('/opt/bin/codex', '/opt/bin/codex exec task')]
     assert q.xq.process_rows() == expected
 
@@ -2564,11 +2613,11 @@ def test_agy_result_is_bounded_and_answer_can_be_large(q, monkeypatch, capsys):
     result.parent.mkdir(parents=True)
     result.write_text(bridge_result('local', answer='review text\n' * 5000), encoding='utf-8')
     limit = q.xq.AGY_RESULT_MAX_BYTES
-    monkeypatch.setattr(q.xq, 'AGY_RESULT_MAX_BYTES', 256)
+    monkeypatch.setattr(q.xq.module_of('AGY_RESULT_MAX_BYTES'), 'AGY_RESULT_MAX_BYTES', 256)
     assert q.cli('agy-sync') == 1
     assert 'exceeds 256 bytes; cannot verify its checksum' in capsys.readouterr().out
     assert q.xq.state(q.repo)['local']['status'] == 'running'
-    monkeypatch.setattr(q.xq, 'AGY_RESULT_MAX_BYTES', limit)
+    monkeypatch.setattr(q.xq.module_of('AGY_RESULT_MAX_BYTES'), 'AGY_RESULT_MAX_BYTES', limit)
     assert q.cli('agy-sync') == 0
     assert q.xq.state(q.repo)['local']['status'] == 'done'
 
@@ -2629,7 +2678,7 @@ def test_cloud_envelope_is_only_printed_after_recording(q, monkeypatch, capsys):
     def refuse(*args):
         q.xq.fail('ledger changed during query')
 
-    monkeypatch.setattr(q.xq, 'append_checked', refuse)
+    monkeypatch.setattr(q.xq.module_of('append_checked'), 'append_checked', refuse)
     with pytest.raises(SystemExit, match='ledger changed'):
         q.envelope('a')
     assert capsys.readouterr().out == ''
@@ -2640,7 +2689,7 @@ def test_agy_explicit_delegate_accepts_large_plain_answer(q, monkeypatch):
     q.assign('local', 'agy')
     result = q.repo / '.agy-bridge/results/local.md'
     result.parent.mkdir(parents=True)
-    monkeypatch.setattr(q.xq, 'AGY_RESULT_MAX_BYTES', 64)
+    monkeypatch.setattr(q.xq.module_of('AGY_RESULT_MAX_BYTES'), 'AGY_RESULT_MAX_BYTES', 64)
     result.write_text('plain review text\n' * 50, encoding='utf-8')
     assert q.cli('agy-sync', '--delegate-exit', 'local=0', '--out', str(result)) == 0
     assert q.xq.state(q.repo)['local']['status'] == 'done'
@@ -2880,7 +2929,7 @@ def test_cloud_discovery_fetch_failure_preserves_other_envelopes(q, monkeypatch,
             q.xq.fail('fixture branch vanished between discovery and fetch')
         return original_fetch(branch, root)
 
-    monkeypatch.setattr(q.xq, 'fetch_branch', fetch)
+    monkeypatch.setattr(q.xq.module_of('fetch_branch'), 'fetch_branch', fetch)
     assert q.cli('cloud-collect', '--discover') == 1
     assert 'PROBLEM claude/gone: could not fetch discovered branch' in capsys.readouterr().out
     states = q.xq.state(q.repo)
@@ -2927,7 +2976,7 @@ def test_cloud_collection_plans_without_a_ledger_write_and_records_local_observa
     assert q.envelope('a') == 0
     reports = council_publish(q, {'a': {}})
     observed_at = '2026-11-09T01:00:00Z'
-    monkeypatch.setattr(q.xq, 'now', lambda: observed_at)
+    monkeypatch.setattr(q.xq.module_of('now'), 'now', lambda: observed_at)
     tasks, _ = q.xq.snapshot(q.repo)
     before = q.xq.events(q.repo)
     accepted, relevant, bad, branches, fetch_failed = q.xq.collect_cloud_reports(
@@ -3002,7 +3051,7 @@ def test_verify_reject_dirty_codex_delivery_never_runs_git_in_worktree(q, monkey
         cwds.append(str(cwd))
         return original(argv, cwd=cwd, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'run', run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', run)
     assert verify(q, verdict='reject') == 0
     assert str(worktree) not in cwds
     assert q.cli('close', '--id', 'local', '--reason', 'rejected') == 0
@@ -3247,7 +3296,7 @@ def test_queued_codex_finish_done_refused(q):
     ('bash', 'bash -c agy --prompt x', None),
 ])
 def test_process_matching_uses_argv0_over_truncated_comm(q, monkeypatch, comm, command, expected):
-    monkeypatch.setattr(q.xq, 'process_rows', lambda: [(comm, command)])
+    monkeypatch.setattr(q.xq.module_of('process_rows'), 'process_rows', lambda: [(comm, command)])
     assert q.real_live_process_counts() == {kind: int(kind == expected) for kind in ('codex', 'agy')}
 
 
@@ -3269,7 +3318,7 @@ def test_live_process_counts_find_real_agy_in_long_directory(q, monkeypatch):
                 break
             time.sleep(0.1)
         assert len(rows) == 1
-        monkeypatch.setattr(q.xq, 'process_rows', lambda: rows)
+        monkeypatch.setattr(q.xq.module_of('process_rows'), 'process_rows', lambda: rows)
         assert q.real_live_process_counts()['agy'] == 1
     finally:
         process.terminate()
@@ -3361,11 +3410,12 @@ def test_doctor_ok_lines_are_facts_and_need_filters_capacity(q, capacity, monkey
     ok_lines = [line for line in out.splitlines() if line.startswith('OK ')]
     assert ok_lines and not any('run xq init' in line or '/plugin update' in line for line in ok_lines)
     assert 'OK /.agents/ledger.jsonl: ignored and untracked' in out
-    monkeypatch.setattr(q.xq, 'plugin_binary', lambda kind, **kwargs: None)
+    monkeypatch.setattr(q.xq.module_of('plugin_binary'), 'plugin_binary', lambda kind, **kwargs: None)
     q.cli('doctor', '--need', 'agy')
     out = capsys.readouterr().out
     assert 'agy running' in out and 'codex running' not in out
-    assert 'MISSING agy-bridge plugin: not installed -> next: /plugin marketplace add' in out
+    assert 'MISSING agy-bridge: not installed -> next: npx skills add dominno/claude-agy-bridge' in out
+    assert '/plugin marketplace add' in out
     with pytest.raises(SystemExit, match='unknown: codx'):
         q.cli('doctor', '--need', 'codx,agy')
 
@@ -3472,16 +3522,16 @@ NEW_SENSITIVE = [
 
 @pytest.mark.parametrize('path', NEW_SENSITIVE)
 def test_cloud_sensitive_paths_cover_auto_run_and_agent_files(q, monkeypatch, path):
-    monkeypatch.setattr(q.xq, 'history_paths', lambda root, base, head: (
+    monkeypatch.setattr(q.xq.module_of('history_paths'), 'history_paths', lambda root, base, head: (
         {path, '.agents/cloud-status/a.json', 'src/app.py'}, set()))
     assert q.xq.sensitive_paths(q.repo, 'base', 'head', 'a') == [path]
 
 
 def test_cloud_sensitive_rules_are_module_constants():
-    text = SCRIPT.read_text()
+    text = (SCRIPT.parent / 'executor_queue/core/review.py').read_text()
     for name in ('SENSITIVE_NAMES', 'SENSITIVE_DIRS', 'SENSITIVE_GLOBS'):
         assert '\n' + name + ' = ' in text
-    assert 'SENSITIVE_NAMES' in (SCRIPT.parents[3] / 'docs/cloud.md').read_text()
+    assert 'SENSITIVE_NAMES' in (SCRIPT.parents[1] / 'references/cloud.md').read_text()
 
 
 def test_unknown_task_suggests_case_variant(q):
@@ -3631,14 +3681,14 @@ def test_pid_alive_semantics(q, monkeypatch):
         def fake(pid, signal):
             raise error
         return fake
-    monkeypatch.setattr(q.xq, 'WINDOWS', False)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', False)
     monkeypatch.setattr(q.xq.os, 'kill', kill(ProcessLookupError()))
     assert q.xq.pid_alive(123) is False
     monkeypatch.setattr(q.xq.os, 'kill', kill(PermissionError()))
     assert q.xq.pid_alive(123) is True
     monkeypatch.setattr(q.xq.os, 'kill', kill(OSError('other')))
     assert q.xq.pid_alive(123) is True
-    monkeypatch.setattr(q.xq, 'WINDOWS', True)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', True)
     monkeypatch.setattr(q.xq.os, 'kill', kill(ProcessLookupError()))
     assert q.xq.pid_alive(123) is True
     monkeypatch.setattr(q.xq.os, 'kill', kill(OverflowError('signed integer is greater than maximum')))
@@ -3861,8 +3911,8 @@ def fake_clock(q, monkeypatch, on_sleep=None):
         if on_sleep:
             on_sleep(len(clock['sleeps']))
 
-    monkeypatch.setattr(q.xq, 'sleep', sleep)
-    monkeypatch.setattr(q.xq, 'monotonic', lambda: clock['now'])
+    monkeypatch.setattr(q.xq.module_of('sleep'), 'sleep', sleep)
+    monkeypatch.setattr(q.xq.module_of('monotonic'), 'monotonic', lambda: clock['now'])
     return clock
 
 
@@ -4106,10 +4156,10 @@ def test_assign_follows_refuses_unknown_executor_or_worktree_mismatch(q):
 
 @pytest.mark.parametrize('platform', [False, True])
 def test_process_rows_skip_zombie_and_exiting_processes(q, monkeypatch, platform):
-    monkeypatch.setattr(q.xq, 'WINDOWS', False)
+    monkeypatch.setattr(q.xq.module_of('WINDOWS'), 'WINDOWS', False)
     output = ('Z    agy agy --prompt a\nUE   agy agy --prompt b\nS    agy agy --prompt c\n'
               'R+   codex codex exec task\nX    codex codex exec gone\n')
-    monkeypatch.setattr(q.xq, 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, output, ''))
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, output, ''))
     assert q.xq.process_rows() == [('agy', 'agy --prompt c'), ('codex', 'codex exec task')]
     assert q.real_live_process_counts() == {'codex': 1, 'agy': 1}
 
@@ -4350,11 +4400,11 @@ def test_poll_wait_tolerates_concurrent_finish(q, monkeypatch):
     real = q.xq.read_agy_header
 
     def racing(*args, **kwargs):
-        monkeypatch.setattr(q.xq, 'read_agy_header', real)
+        monkeypatch.setattr(q.xq.module_of('read_agy_header'), 'read_agy_header', real)
         q.xq.append(q.repo, dict(event='finish', id='review', status='done', summary='concurrent sync'))
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(q.xq, 'read_agy_header', racing)
+    monkeypatch.setattr(q.xq.module_of('read_agy_header'), 'read_agy_header', racing)
     fake_clock(q, monkeypatch)
     assert q.cli('poll', '--id', 'review', '--wait') == 0
     assert len(rows_for(q, 'review', 'finish')) == 1
@@ -4368,7 +4418,7 @@ def test_poll_wait_gives_up_after_repeated_ledger_conflicts(q, monkeypatch):
         calls.append(1)
         raise q.xq.LedgerConflict('xq: ledger changed during query; retry to reconcile fresh state')
 
-    monkeypatch.setattr(q.xq, 'poll_task', conflict)
+    monkeypatch.setattr(q.xq.module_of('poll_task'), 'poll_task', conflict)
     fake_clock(q, monkeypatch)
     with pytest.raises(SystemExit, match='ledger changed during query'):
         q.cli('poll', '--id', 'review', '--wait')
@@ -4539,7 +4589,7 @@ def test_ignored_scan_is_bounded(q, monkeypatch, capsys):
     (worktree / 'cache').mkdir()
     for index in range(6):
         (worktree / 'cache' / '{}.pth'.format(index)).write_text('x')
-    monkeypatch.setattr(q.xq, 'WORKTREE_SCAN_LIMIT', 3)
+    monkeypatch.setattr(q.xq.module_of('WORKTREE_SCAN_LIMIT'), 'WORKTREE_SCAN_LIMIT', 3)
     paths, truncated = q.xq.ignored_paths(str(worktree), limit=3)
     assert len(paths) == 3 and truncated is True
     paths, truncated = q.xq.ignored_paths(str(worktree))
@@ -4608,9 +4658,9 @@ def test_truncated_ignored_scan_requires_ack(q, monkeypatch):
     (worktree / 'cache').mkdir()
     for index in range(4):
         (worktree / 'cache' / '{}.txt'.format(index)).write_text('x')
-    monkeypatch.setattr(q.xq, 'WORKTREE_SCAN_LIMIT', 2)
+    monkeypatch.setattr(q.xq.module_of('WORKTREE_SCAN_LIMIT'), 'WORKTREE_SCAN_LIMIT', 2)
     real = q.xq.ignored_paths
-    monkeypatch.setattr(q.xq, 'ignored_paths',
+    monkeypatch.setattr(q.xq.module_of('ignored_paths'), 'ignored_paths',
                         lambda checkout, pathspecs=(), index=None: real(checkout, 2, pathspecs, index))
     finish(q)
     with pytest.raises(SystemExit, match=r'<ignored files outside dependency directories beyond the first 2 not '
@@ -4832,7 +4882,7 @@ def test_hook_names_helper_path_and_verify_command(q, capsys):
 
 
 def test_preflight_lists_counted_processes(q, monkeypatch, capsys):
-    monkeypatch.setattr(q.xq, 'live_process_counts', q.real_live_process_counts)
+    monkeypatch.setattr(q.xq.module_of('live_process_counts'), 'live_process_counts', q.real_live_process_counts)
     listing = ('4242 S    node     node /plugins/codex-companion.mjs task --background\n'
                '4343 S    codex    codex exec --api-key=SECRET brief\n'
                '4444 Z    codex    codex exec zombie\n'
@@ -4846,7 +4896,7 @@ def test_preflight_lists_counted_processes(q, monkeypatch, capsys):
         assert argv == ['ps', '-axww', '-o', 'pid=,stat=,ucomm=,args=']
         return subprocess.CompletedProcess(argv, 0, listing, '')
 
-    monkeypatch.setattr(q.xq, 'run', fake_run)
+    monkeypatch.setattr(q.xq.module_of('run'), 'run', fake_run)
     assert q.cli('preflight', '--executor', 'codex') == 1
     out = capsys.readouterr().out
     assert 'codex counted: pid 4242 node /plugins/codex-companion.mjs task' in out
@@ -4983,7 +5033,7 @@ def test_index_flag_listing_failure_still_finds_hidden_edits(q, monkeypatch, cap
     worktree, head = delivered_worktree(q)
     assert finish(q) == 0
     hide(q, worktree, '--skip-worktree', 'conftest.py', 'import os\n')
-    monkeypatch.setattr(q.xq, 'index_flags', lambda checkout, paths: None)
+    monkeypatch.setattr(q.xq.module_of('index_flags'), 'index_flags', lambda checkout, paths: None)
     # The scratch-index scan finds the edit; only its (index-hidden) label needs the flag listing.
     with pytest.raises(SystemExit, match=r'sensitive path\(s\): conftest\.py \(uncommitted\)'):
         q.cli(*pass_args())
@@ -4991,9 +5041,7 @@ def test_index_flag_listing_failure_still_finds_hidden_edits(q, monkeypatch, cap
 
 
 def test_index_hidden_entry_tags():
-    spec = importlib.util.spec_from_file_location('xq_tags', SCRIPT)
-    xq = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(xq)
+    xq = load_xq()
     assert [xq.index_hidden_entry(e) for e in ('H a', 'S b c', 'h d', 's e', 'M f', 'C g', 'Hx')] == [
         None, ('b c', 'S'), ('d', 'h'), ('e', 's'), None, None, None]
 
@@ -5392,7 +5440,7 @@ def stub_codex_reads(q, monkeypatch, reads):
         return (status, ['node', str(companion)], None, ['TMPDIR fallback'],
                 {'pid': pid, 'phase': None, 'updated': None})
 
-    monkeypatch.setattr(q.xq, 'query_codex_status', query)
+    monkeypatch.setattr(q.xq.module_of('query_codex_status'), 'query_codex_status', query)
     q.assign('local', 'codex', '--job', 'job1', '--worktree', str(q.repo))
     q.git('commit', '-q', '--allow-empty', '-m', 'codex delivery')
     return calls
@@ -5503,9 +5551,7 @@ def test_close_pending_job_without_bridge_cancel_suggests_manual_removal(q):
 
 
 def test_every_executor_has_registered_adapter_with_documented_interface():
-    spec = importlib.util.spec_from_file_location('xq_adapter_guard', SCRIPT)
-    xq = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(xq)
+    xq = load_xq()
     base = xq.ExecutorAdapter
     operations = [name for name, value in vars(base).items() if isinstance(value, staticmethod)]
     capabilities = [name for name, value in vars(base).items()
@@ -5525,8 +5571,14 @@ def test_every_executor_has_registered_adapter_with_documented_interface():
         for name in capabilities:
             assert hasattr(adapter, name), (executor, name)
     assert xq.adapter_for('unknown') is base and xq.adapter_for(None) is base
-    source = SCRIPT.read_text(encoding='utf-8')
-    banners = [re.search(r'^# ' + title + r'$', source, re.M) for title in ('CORE', 'PORT', 'ADAPTERS', 'CLI')]
-    assert all(banners) and [m.start() for m in banners] == sorted(m.start() for m in banners)
-    core = source[banners[0].start():banners[1].start()]
+    # CORE is the executor_queue/core package; PORT (port/), ADAPTERS (adapters/) and CLI follow it, in that order.
+    package = SCRIPT.parent / 'executor_queue'
+    core_files = sorted((package / 'core').glob('*.py'))
+    layers = core_files + sorted((package / 'port').glob('*.py')) + sorted((package / 'adapters').glob('*.py'))
+    source = ''.join(path.read_text(encoding='utf-8') for path in layers) + \
+        ''.join(path.read_text(encoding='utf-8') for path in sorted((package / 'cli').rglob('*.py')))
+    core_end = sum(len(path.read_text(encoding='utf-8')) for path in core_files)
+    banners = [re.search(r'^# ' + title + r'$', source, re.M) for title in ('PORT', 'ADAPTERS', 'CLI')]
+    assert core_files and all(banners) and [m.start() for m in banners] == sorted(m.start() for m in banners)
+    core = source[:core_end]
     assert 'subprocess' not in core

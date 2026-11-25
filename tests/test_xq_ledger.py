@@ -1,5 +1,4 @@
 """Offline tests for the configurable ledger path and `xq.py import` (existing-ledger hand-off)."""
-import importlib.util
 import io
 import json
 import os
@@ -10,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'skills/executor-queue/scripts/xq.py'
+from conftest import load_xq
+
+SCRIPT = Path(__file__).resolve().parents[1] / '.claude/skills/executor-queue/scripts/xq.py'
 
 BRIEF = '''# Imported follow-up
 Result: The app module prints a greeting.
@@ -38,11 +39,9 @@ def h(tmp_path, monkeypatch, isolated_queue_environment):
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.chdir(repo)
-    spec = importlib.util.spec_from_file_location('xq_ledger_under_test', SCRIPT)
-    xq = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(xq)
-    monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
-    monkeypatch.setattr(xq, 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
+    xq = load_xq()
+    monkeypatch.setattr(xq.module_of('resource_readings'), 'resource_readings', lambda root: dict(load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
+    monkeypatch.setattr(xq.module_of('live_process_counts'), 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
     repo = repo.resolve()
 
     def git(*args, cwd=None):

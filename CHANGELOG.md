@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Changed: repository layout
+- Everything the skill uses now lives in one directory, `.claude/skills/executor-queue/` (`SKILL.md`, `README.md`,
+  `LICENSE`, `scripts/xq.py`, `references/` for the former `docs/*.md` guides, `assets/` for the former `examples/`),
+  with `.agents/skills/executor-queue` as a relative symlink for Codex. Install the whole directory with the Skills CLI:
+  `npx skills add dominno/claude-executor-queue --skill executor-queue -a claude-code -a codex` (`-g` for every
+  project, `--copy` for independent copies, or a local clone path instead of the GitHub name).
+- `install.sh`, `install.ps1`, `scripts/install.py` and `VERSION` are removed; the version lives in `xq.py --version`
+  and `SKILL.md`. Delete a copy made by the old installer (and its `.executor-queue-install.json`) before
+  reinstalling. The per-version notes and dated review documents under `docs/` are removed; this changelog is the
+  record. `SKILL.md` links its guides relatively and says how to resolve the skill directory in Codex.
+- `doctor --need agy`, `poll` and `close` find agy-bridge installed as a skill (`.claude/skills/agy-bridge/scripts/agy-bridge`,
+  then `.agents/skills/...` in the project, then the same two under the home directory) before the Claude Code
+  plugin; doctor prints the location it used. The Codex companion lookup is unchanged.
+- Internal: xq.py split into the executor_queue package (core/port/adapters/cli)
+
 ### Upgrading
 - Use this helper in every session that shares a ledger once a project uses config `ledger` or `xq import`: the
   3.6.0 helper ignores `import` events (imported history is invisible to it) and always reads
@@ -300,7 +315,7 @@
 - Bound cloud reports, drop unknown stored keys, and retain full report SHA-256 for change detection.
 - Document Git >= 2.31 and report/warn on Git versions in doctor. Keep Stop hooks read-only and unlocked.
 - Add validated load/disk/concurrency preflight, conservative injectable OS process counts, doctor readings, and idle-hook refusal diagnostics.
-- See docs/v3.2-notes.md for regression mapping and suite results.
+- The regression mapping and suite results were in docs/v3.2-notes.md (removed; see Git history).
 
 ## v3.1 — 3.1.0 — 2026-11-09
 
@@ -310,7 +325,7 @@
 - Add heartbeat/ack and explicit close; fix queued agy promotion and complete worktree review exports.
 - Protect local state exclusions and symlink writes; guard missing-install hooks and stage upgrade swaps with rollback.
 - Harden Windows locking, UTF-8 output, bridge launch and PowerShell Python detection; add Windows CI configuration.
-- Keep the installed payload to two stdlib/Python 3.8+ files. See docs/v3.1-notes.md for per-finding regressions and validation limits.
+- Keep the installed payload to two stdlib/Python 3.8+ files. Per-finding regressions were in docs/v3.1-notes.md (removed; see Git history).
 
 ## v3 — 3.0.0 — 2026-11-08
 
@@ -323,7 +338,7 @@
 
 ## v2 — 2.0.0 — 2026-11-08
 
-Summary of the 25 items in `docs/critic-review-2026-11-08.md` (item 25 was a
+Summary of the 25 items in the v2 critic review (removed from docs/; see Git history; item 25 was a
 rejected objection, retained for context rather than claimed as a new fix):
 
 1. Stop hook reads stdin, honors recursion guard, limits idle enforcement to real
@@ -365,7 +380,7 @@ rejected objection, retained for context rather than claimed as a new fix):
 25. Preserve the existing all-outgoing-commits scan; add the concrete scan command
     under item 17 (the original objection was rejected).
 
-See `docs/v2-notes.md` for historical validation and follow-up reconciliation.
+Historical validation notes were in `docs/v2-notes.md` (removed; see Git history).
 
 ## v1 — 1.0.0 — 2026-11-08
 
