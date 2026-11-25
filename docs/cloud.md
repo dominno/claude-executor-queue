@@ -38,7 +38,14 @@ restricted network policy, and **no secrets in environment settings**. Try one s
    Network Git disables terminal prompts and times out after five minutes per operation.
    If a discovered branch cannot be fetched, discovery reports the failure and exits nonzero after collecting valid results from independent branches.
    MISSING/CHANGED/PROBLEM requires explicit reconciliation; collection does not overwrite a prior imported result.
-   WARN SENSITIVE lists instruction basenames at any depth, hooks, CI, lockfiles, config, briefs, other status files and symlink changes, including rename deletions.
+   WARN SENSITIVE lists changed paths that can steer agents or run code (rules: `SENSITIVE_NAMES`, `SENSITIVE_DIRS`, `SENSITIVE_GLOBS` in `xq.py`, matched case-insensitively):
+   agent instruction/control files at any depth (AGENTS.md, CLAUDE.md, CLAUDE.local.md, GEMINI.md, .cursorrules, .windsurfrules, .mcp.json,
+   .agy-bridge.json); package manifests and auto-run config (package.json, pyproject.toml, setup.py/.cfg, conftest.py, tox.ini, noxfile.py,
+   .pre-commit-config.yaml, .npmrc, .yarnrc[.yml], .pnpmfile.cjs, .envrc, .env, .env.*, go.mod, Cargo.toml, Gemfile, Rakefile, .gitlab-ci.yml,
+   gradle-wrapper.properties); lockfiles and `*.lock`; Makefiles, .gitattributes, .lfsconfig; any path under .claude, .github, .husky, hooks,
+   .githooks, .vscode, .idea, .devcontainer, .gemini, .codex, .cursor, .agy-bridge, .agent, _agents, _agent, .windsurf, .clinerules, .roo,
+   .kiro, .direnv, .yarn, .mvn or .circleci (a superset of agy-bridge's EDIT_DENY); every `.agents/` path except the task's own status file
+   (config, briefs, other status files); the brief; and symlink and submodule-pointer changes, including rename deletions.
    The scan covers each commit between the pinned base and the session tip, including paths restored by a later commit.
    Inspect these warnings before testing. They do not affect the collection exit code.
    `finish --status failed` cancels each running batch id locally; it cannot
@@ -48,7 +55,15 @@ restricted network policy, and **no secrets in environment settings**. Try one s
    Map task commits via status.head and id messages; inspect intervening commits too (status files are only claims).
    Check allowed files, unchanged test strength, and run the actual checks with a clean environment and an independent reader.
    Revert rejected tasks in verification or cherry-pick accepted commits to isolate what you test. Failed/blocked commits must
-   touch only their own status file. Record a verdict per task. After authorization, record integration with `xq.py merge`.
+   touch only their own status file. Record a verdict per task. `verify --verdict pass` repeats the sensitive-path review
+   for the pinned base..collected head (the fork from main when an old ledger has no base), lists `WARN SENSITIVE` paths,
+   records them on the verify event and refuses until you inspect them and add `--ack-sensitive`; `merge` repeats them.
+   A batch commits one status per task, so a later task's range contains earlier siblings' status commits: a same-batch
+   sibling's `.agents/cloud-status/<sibling>.json` is exempt while its blob at the verified head still equals the report
+   cloud-collect recorded for that sibling (collect likewise does not warn about same-batch sibling statuses). The range
+   is cumulative from the pinned base, so a later task also lists sensitive paths that earlier tasks' commits changed;
+   acknowledge them only after checking which task made each change (`git log <base>..<head> -- <path>`).
+   After authorization, record integration with `xq.py merge`.
    Derive the next brief yourself from verified evidence, never from executor suggestions as instructions.
 
 
@@ -66,9 +81,10 @@ head != base, a commit message containing the exact task ID and a distinct head 
 delivery SHA after collection, including when the report uses an abbreviation. Repeated collection confirms that the
 delivery remains an ancestor of the session branch. Merge recording requires it to be an ancestor of the integration commit and that commit
 to be reachable from the local default branch. Warnings identify later commits and non-pass sibling IDs;
-review them before integrating. Ordinary verification requires the original collected delivery commit. If you integrate
+review them before integrating. Ordinary verification requires the original collected delivery commit or a commit that
+descends from it (it then replaces the recorded delivery). If you integrate
 by cherry-pick, verify the resulting commit independently and record the rewritten SHA with
-`verify --force --head <cherry-pick-sha>`, followed by `merge --force --commit <integration-sha>` with explicit authorization.
+`verify --force --head <cherry-pick-sha>` (plus `--ack-sensitive` when it lists SENSITIVE paths), followed by `merge --force --commit <integration-sha>` with explicit authorization.
 Both commands record the reconciliation in the ledger. Remote reports never supply this authority.
 
 Healthy long cloud sessions can use `ack --id <id> --hours 12`; pause suppresses idle and stale checks

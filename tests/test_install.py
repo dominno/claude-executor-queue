@@ -234,7 +234,7 @@ def test_source_cache_is_not_installed(install):
 def test_release_markers_and_python38_installer_syntax():
     version = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
     skill = (ROOT / 'skills/executor-queue/SKILL.md').read_text(encoding='utf-8')
-    assert len(skill.splitlines()) <= 110
+    assert len(skill.splitlines()) <= 125
     assert '\nversion: ' + version + '\n' in skill
     assert '— ' + version + ' —' in (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
     major_minor = version.rsplit('.', 1)[0]

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566" role="img" aria-labelledby="lifecycle-title lifecycle-desc" xml:lang="en">
   <title id="lifecycle-title">From request to reviewed result</title>
-  <desc id="lifecycle-desc">Authorize the task scope and write a brief. Start the selected executor separately and record its assignment in the required order. Queued work awaits dispatch. Read recorded progress with status, then explicitly import or record the actual outcome. Review the delivery independently, record verification, and integrate code only with authorization.</desc>
+  <desc id="lifecycle-desc">Authorize the task scope and write a brief; check it with brief-lint and optionally build the launch prompt with compose. Run preflight, start the selected executor yourself and record the assignment with assign. Queued work awaits dispatch. Refresh with poll, agy-sync or cloud-collect, or record the actual outcome with finish; the result is done, failed or blocked. Review the delivery independently and record pass, fixes or reject with verify, after the scope and sensitive-path warnings are inspected. Integrate with merge only with authorization, and retire entries with close.</desc>
 
   <rect x="1" y="1" width="878" height="564" rx="23" fill="#F3F6FB" stroke="#D6DFED" stroke-width="2"/>
 
@@ -47,17 +47,17 @@
     </g>
 
     <g fill="#435570" font-size="17">
-      <text x="137" y="151">Agree on the executor, files, limits, and checks.</text>
-      <text x="137" y="173">Put those decisions in a task brief.</text>
+      <text x="137" y="151">Agree on the executor, files, limits, and checks; write a task brief.</text>
+      <text x="137" y="173">Check it with <tspan fill="#245BD6" font-weight="700">brief-lint</tspan>; <tspan fill="#245BD6" font-weight="700">compose</tspan> prepends configured context files.</text>
 
-      <text x="137" y="263">Start the executor separately and follow its assignment order.</text>
-      <text x="137" y="285"><tspan fill="#245BD6" font-weight="700">Queued</tspan> means the task is waiting for dispatch.</text>
+      <text x="137" y="263">Run <tspan fill="#245BD6" font-weight="700">preflight</tspan>, start the executor yourself, then record it with <tspan fill="#245BD6" font-weight="700">assign</tspan>.</text>
+      <text x="137" y="285"><tspan fill="#245BD6" font-weight="700">Queued</tspan> means waiting for dispatch. A stale worktree base gets a warning.</text>
 
-      <text x="137" y="375">Read recorded progress with <tspan fill="#096B5E" font-weight="700">status</tspan>.</text>
-      <text x="137" y="397">Refresh with <tspan fill="#096B5E" font-weight="700">poll</tspan>, <tspan fill="#096B5E" font-weight="700">agy-sync</tspan>, or <tspan fill="#096B5E" font-weight="700">cloud-collect</tspan>. Record manually with <tspan fill="#096B5E" font-weight="700">finish</tspan>.</text>
+      <text x="137" y="375">Refresh with <tspan fill="#096B5E" font-weight="700">poll</tspan>, <tspan fill="#096B5E" font-weight="700">agy-sync</tspan>, or <tspan fill="#096B5E" font-weight="700">cloud-collect</tspan>, or record it with <tspan fill="#096B5E" font-weight="700">finish</tspan>.</text>
+      <text x="137" y="397">The result is done, failed, or blocked. Read it with <tspan fill="#096B5E" font-weight="700">status</tspan>.</text>
 
-      <text x="137" y="487">Inspect the delivery and record the verdict with <tspan fill="#613E9B" font-weight="700">verify</tspan>.</text>
-      <text x="137" y="509"><tspan fill="#613E9B" font-weight="700">Optional integration</tspan> requires user authorization.</text>
+      <text x="137" y="487">Inspect the delivery; record pass, fixes, or reject with <tspan fill="#613E9B" font-weight="700">verify</tspan>.</text>
+      <text x="137" y="509">Inspect <tspan fill="#613E9B" font-weight="700">SCOPE</tspan>/<tspan fill="#613E9B" font-weight="700">SENSITIVE</tspan> warnings; <tspan fill="#613E9B" font-weight="700">merge</tspan> needs approval; <tspan fill="#613E9B" font-weight="700">close</tspan> retires it.</text>
     </g>
   </g>
 </svg>

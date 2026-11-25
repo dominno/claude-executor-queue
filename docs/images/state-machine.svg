@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 450" width="880" height="450" role="img" aria-labelledby="sm-title sm-desc" xml:lang="en">
+  <title id="sm-title">Task states and verdicts</title>
+  <desc id="sm-desc">A task recorded with assign --queued starts queued; assign without --queued records it running. poll, agy-sync, cloud-collect or finish record the actual result: done, failed or blocked. verify records a reader verdict: pass, fixes or reject; pass needs a done task. merge records an integration after a pass. close retires an entry at any point with the reason dropped, rejected or superseded-by another task; a closed task that is still running keeps its launch slot until terminal evidence is recorded.</desc>
+  <style>
+    text { font-family: 'Segoe UI', Arial, sans-serif; fill: #142438; }
+    .heading { font-size: 32px; font-weight: 700; }
+    .intro { font-size: 18px; fill: #435570; }
+    .label { font-size: 19px; font-weight: 700; }
+    .detail { font-size: 16px; fill: #435570; }
+    .command { font: 700 16px Consolas, 'Liberation Mono', monospace; }
+    .arrow { fill: none; stroke: #8293AB; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+
+  <rect x="1" y="1" width="878" height="448" rx="24" fill="#F3F6FB" stroke="#D6DFED"/>
+  <text x="30" y="55" class="heading">Task states and verdicts</text>
+  <text x="30" y="86" class="intro">The ledger records each step; xq never moves a task on its own.</text>
+
+  <g fill="#FFFFFF" stroke="#D6DFED">
+    <rect x="30" y="160" width="180" height="70" rx="14"/>
+    <rect x="250" y="160" width="160" height="70" rx="14"/>
+    <rect x="460" y="112" width="160" height="56" rx="14"/>
+    <rect x="460" y="182" width="160" height="56" rx="14"/>
+    <rect x="460" y="252" width="160" height="56" rx="14"/>
+    <rect x="670" y="112" width="180" height="70" rx="14"/>
+    <rect x="670" y="238" width="180" height="70" rx="14"/>
+    <rect x="30" y="344" width="820" height="76" rx="14"/>
+  </g>
+  <g>
+    <rect x="30" y="177" width="5" height="36" rx="2.5" fill="#245BD6"/>
+    <rect x="250" y="177" width="5" height="36" rx="2.5" fill="#245BD6"/>
+    <rect x="460" y="122" width="5" height="36" rx="2.5" fill="#096B5E"/>
+    <rect x="460" y="192" width="5" height="36" rx="2.5" fill="#096B5E"/>
+    <rect x="460" y="262" width="5" height="36" rx="2.5" fill="#096B5E"/>
+    <rect x="670" y="129" width="5" height="36" rx="2.5" fill="#613E9B"/>
+    <rect x="670" y="255" width="5" height="36" rx="2.5" fill="#613E9B"/>
+    <rect x="30" y="364" width="5" height="36" rx="2.5" fill="#8293AB"/>
+  </g>
+
+  <path class="arrow" d="M210 195h33m-6-5 6 5-6 5"/>
+  <path class="arrow" d="M410 195h22v-55h21m-6-5 6 5-6 5"/>
+  <path class="arrow" d="M432 195v15h21m-6-5 6 5-6 5"/>
+  <path class="arrow" d="M432 205v75h21m-6-5 6 5-6 5"/>
+  <path class="arrow" d="M620 140h43m-6-5 6 5-6 5"/>
+  <path class="arrow" d="M760 182v49m-5-6 5 6 5-6"/>
+  <path class="arrow" d="M540 308v29m-5-6 5 6 5-6"/>
+
+  <text x="50" y="190" class="label">queued</text>
+  <text x="50" y="214" class="command" style="fill:#245BD6">assign --queued</text>
+  <text x="270" y="190" class="label">running</text>
+  <text x="270" y="214" class="command" style="fill:#245BD6">assign</text>
+  <text x="200" y="153" class="detail">promote</text>
+
+  <text x="480" y="146" class="label">done</text>
+  <text x="480" y="216" class="label">failed</text>
+  <text x="480" y="286" class="label">blocked</text>
+  <text x="250" y="262" class="detail">poll · agy-sync</text>
+  <text x="250" y="284" class="detail">cloud-collect · finish</text>
+
+  <text x="690" y="142" class="label">verify</text>
+  <text x="690" y="166" class="detail">pass · fixes · reject</text>
+  <text x="770" y="214" class="detail">pass</text>
+  <text x="690" y="268" class="label">merged</text>
+  <text x="690" y="292" class="command" style="fill:#613E9B">merge</text>
+
+  <text x="50" y="374" class="label">closed</text>
+  <text x="140" y="374" class="command" style="fill:#435570">close --reason dropped | rejected | superseded-by:&lt;id&gt;</text>
+  <text x="50" y="402" class="detail">Retires an entry at any point. A closed task still running keeps its slot until terminal evidence.</text>
+</svg>

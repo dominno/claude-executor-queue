@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 460" width="880" height="460" role="img" aria-labelledby="title desc" xml:lang="en">
   <title id="title">What each executor receives and returns</title>
-  <desc id="desc">Refresh executor evidence explicitly. Codex takes a task brief and produces a job result with code changes in a Git worktree, which xq can record with poll. agy-bridge sends approved files to Google Antigravity for review, and xq can import the local artifacts with agy-sync. Claude Code on the web works from a pushed brief and publishes a report on a Git branch. xq fetches and imports that evidence with cloud-collect.</desc>
+  <desc id="desc">Refresh executor evidence explicitly. Codex takes a task brief (or the prompt compose builds from configured context files plus the brief) and produces a job result with code changes in a Git worktree, which xq can record with poll. agy-bridge sends approved files to Google Antigravity for review, and xq can import the local artifacts with poll or agy-sync. Claude Code on the web works from a pushed brief and publishes a report on a Git branch. xq fetches and imports that evidence with cloud-collect.</desc>
   <style>
     text { font-family: 'Segoe UI', Arial, sans-serif; fill: #142438; }
     .heading { font-size: 32px; font-weight: 700; }
@@ -24,7 +24,8 @@
   <g transform="translate(0 139)">
     <rect x="30" width="820" height="86" rx="14" fill="#FFFFFF" stroke="#D6DFED"/>
     <rect x="30" y="17" width="5" height="52" rx="2.5" fill="#245BD6"/>
-    <text x="54" y="49" class="label">Task brief</text>
+    <text x="54" y="38" class="label">Task brief</text>
+    <text x="54" y="62" class="detail">+ context files</text>
     <path class="arrow" d="M198 43h19m-6-5 6 5-6 5 M429 43h19m-6-5 6 5-6 5 M626 43h19m-6-5 6 5-6 5"/>
     <text x="240" y="38" class="label">Codex</text>
     <text x="240" y="62" class="detail">Git worktree</text>
@@ -43,8 +44,8 @@
     <text x="240" y="62" class="detail">Google Antigravity</text>
     <text x="471" y="38" class="label">Review artifacts</text>
     <text x="471" y="62" class="detail">Local bridge output</text>
-    <rect x="667" y="24" width="111" height="38" rx="9" fill="#E3F5F0"/>
-    <text x="681" y="49" class="command" style="fill:#096B5E">agy-sync</text>
+    <rect x="667" y="24" width="155" height="38" rx="9" fill="#E3F5F0"/>
+    <text x="681" y="49" class="command" style="fill:#096B5E">poll/agy-sync</text>
   </g>
 
   <g transform="translate(0 337)">

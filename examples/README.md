@@ -2,12 +2,16 @@
 
 Adapt named files, checks and IDs before use; these examples do not launch jobs.
 
-- `codex-task.md`: copy to `.agents/briefs/<id>.md`; dispatch from a fresh worktree.
+- `codex-task.md`: copy to `.agents/briefs/<id>.md`, check it with `xq.py brief-lint --brief <path>` (it passes
+  as shipped: one `Result:` line and a final `## Acceptance` with `Files:`/`Checks:`/`Notes:`); dispatch from a fresh worktree.
 - `agy-job.json`: name must match the xq assignment. Inspect `/agy:dry-run`'s
   manifest before sending the explicitly authorized nonconfidential files to Google.
 - `cloud-batch.md`: copy to `.agents/briefs/<batch>.md`; exact `## <id>` sections
-  must match `cloud-envelope --tasks`. Review all outgoing commits before each authorized push.
+  must match `cloud-envelope --tasks`. Review all outgoing commits before each authorized push. A batch brief has
+  no per-task Acceptance, so `brief-lint` and the declared-scope check do not apply to it.
 - `.agents/config.json`: opt-in keep_busy for Codex; merge with existing config.
+- `.agents/config.full.json`: every config key at its default (sample `main`, `context_files`, `import_map`);
+  see [Configuration](../docs/configuration.md). Copy only the keys you need.
 - `settings.json`: macOS/Linux Stop-hook snippet using `python3`.
 - `settings.windows.json`: Windows Stop-hook snippet for Claude Code with Git Bash using `py -3`.
 

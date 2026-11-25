@@ -7,4 +7,4 @@ to reproduce the issue without sharing credentials or private project files.
 
 Run `executor-queue` only in a checkout and under a user account you trust. Keep
 the ledger, review exports and bridge state local. Review what each external
-executor would receive before submitting work. See [Safety in the README](README.md#safety).
+executor would receive before submitting work. See [What gets shared in the README](README.md#what-gets-shared).

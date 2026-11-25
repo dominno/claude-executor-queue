@@ -1,6 +1,6 @@
 # Installation and maintenance
 
-[Start with the Skills CLI quickstart](../README.md#quickstart-in-a-new-project) to install and try the skill in a Git project. The installed files are `SKILL.md`, `scripts/xq.py` and `LICENSE`.
+[Start with the Skills CLI quickstart](../README.md#install) to install and try the skill in a Git project. The installed files are `SKILL.md`, `scripts/xq.py` and `LICENSE`.
 
 ## Run xq directly
 

@@ -35,7 +35,7 @@ def queue(xq, tmp_path, monkeypatch, isolated_queue_environment):
     monkeypatch.chdir(repo)
     monkeypatch.setattr(xq, 'resource_readings', lambda root: dict(
         load=0, cpus=2, repo_free_gb=10, temp_free_gb=10))
-    monkeypatch.setattr(xq, 'live_process_counts', lambda: dict(codex=0, agy=0))
+    monkeypatch.setattr(xq, 'live_process_counts', lambda samples=None: dict(codex=0, agy=0))
 
     def git(*args):
         return subprocess.run(
@@ -107,8 +107,9 @@ def assign(q, task='local', executor='codex'):
         # Historical/synthetic cloud lifecycle fixture; new CLI assignments use envelopes.
         q.xq.append(q.repo, dict(event='assign', id=task, executor=executor, brief=q.brief, note='fixture'))
         return
+    # Ledger-only Codex fixtures have no worktree; that needs an explicit, recorded --force.
     assert q.cli('assign', '--id', task, '--executor', executor,
-                 '--brief', q.brief, '--note', 'fixture') == 0
+                 '--brief', q.brief, '--note', 'fixture', *(['--force'] if executor == 'codex' else [])) == 0
 
 
 def finish(q, task='local', status='done'):

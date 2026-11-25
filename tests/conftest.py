@@ -6,7 +6,7 @@ import pytest
 @pytest.fixture
 def isolated_queue_environment(tmp_path, monkeypatch):
     for key in tuple(os.environ):
-        if key.startswith(('GIT_', 'XQ_')) or key == 'CLAUDE_CONFIG_DIR':
+        if key.startswith(('GIT_', 'XQ_')) or key in ('CLAUDE_CONFIG_DIR', 'CLAUDE_PLUGIN_DATA'):
             monkeypatch.delenv(key)
 
     home = tmp_path / 'home'
