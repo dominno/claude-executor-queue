@@ -67,6 +67,10 @@ Set `context: false` for the exact manifest above. By default, a job also sends 
 `context_files`. Leave `need: false` unless the user has specifically authorized additional files requested
 by the model. Queue runs annotate citations for every job. With `cite: true`, unverified citations mean
 exit 17. Unknown fields or invalid jobs yield exit 1, while rule, path or lock refusals yield exit 4.
+`"remote": true` (optional `"remote_project"`) runs the job on an agy remote agent in Google's cloud: the
+files are pasted into the prompt and the conversation stays in that remote project. Use it only when the user
+explicitly asks for a remote agent; the account's running-environment limit yields exit 10. xq records the job
+the same way.
 
 1. Use `assign --queued` and `"$AGYB" queue add job.json --repo "$root"` to stage each job. Use the bridge's
    default queue and result directories so xq can reconcile the artifacts.

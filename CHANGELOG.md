@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Docs
+- agy reference: queue jobs may set `"remote": true` (agy-bridge remote agent); needs explicit user request.
+
 ### Fixed: docs
 - agy steps and the `doctor --need agy` hint name `agy-bridge dry-run`/`doctor` (`/agy-bridge ...` in Claude Code)
   instead of the removed `/agy:dry-run` and `/agy:doctor` plugin commands.
