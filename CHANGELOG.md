@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Docs
+- README: new "Connect your executors" section (Codex, agy, Claude Code on the web: install, sign-in, doctor check)
+  and "Quickstart: one agy review" (run end to end against real agy); code layout moved to CONTRIBUTING.
+- agy setup moved from `references/codex.md` to its own `references/agy.md#setup` with the current agy install command.
+- Architecture infographic points to the one-time setup.
 - agy reference: queue jobs may set `"remote": true` (agy-bridge remote agent); needs explicit user request.
 
 ### Fixed: docs

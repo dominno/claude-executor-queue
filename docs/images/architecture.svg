@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="566" viewBox="0 0 880 566"
      role="img" aria-labelledby="architecture-title architecture-description" xml:lang="en">
   <title id="architecture-title">How executor-queue fits together</title>
-  <desc id="architecture-description">You authorize work with /executor-queue in Claude Code. The skill coordinates Codex, agy-bridge, and Claude Code on the web; you start each executor yourself. xq.py records work and never launches executors. It keeps an append-only task ledger, by default .agents/ledger.jsonl, shared by Git worktrees; the config key ledger can move it and import adds an existing ledger as history. Project policy lives in .agents/config.json. Explicit refresh commands update the ledger from executor evidence. Git tracks selected briefs and status files separately.</desc>
+  <desc id="architecture-description">You authorize work with /executor-queue in Claude Code. The skill coordinates Codex, agy-bridge, and Claude Code on the web; you connect each executor once (README: Connect your executors) and start it yourself. xq.py records work and never launches executors. It keeps an append-only task ledger, by default .agents/ledger.jsonl, shared by Git worktrees; the config key ledger can move it and import adds an existing ledger as history. Project policy lives in .agents/config.json. Explicit refresh commands update the ledger from executor evidence. Git tracks selected briefs and status files separately.</desc>
   <defs>
     <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"
             markerUnits="userSpaceOnUse">
@@ -47,8 +47,8 @@
     <g fill="#435570" font-size="16">
       <text x="234" y="128">Invoke /executor-queue in Claude Code.</text>
       <text x="234" y="232">Coordinates delegated work and verification.</text>
-      <text x="60" y="360">Codex and agy-bridge · installed separately</text>
-      <text x="60" y="382">Claude Code on the web · connected repository</text>
+      <text x="60" y="360">Codex · agy-bridge · Claude Code on the web</text>
+      <text x="60" y="382">One-time setup: see the README</text>
       <text x="478" y="360">Records work; never launches executors.</text>
       <text x="478" y="382">Authorized refreshes update the ledger.</text>
       <text x="478" y="479">Default .agents/ledger.jsonl (config ledger).</text>

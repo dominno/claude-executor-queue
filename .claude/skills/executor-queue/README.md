@@ -18,7 +18,7 @@ python3 .claude/skills/executor-queue/scripts/xq.py status --open
 | Guide | Covers |
 | --- | --- |
 | [Codex](references/codex.md) | setup, worktree tasks, preflight, brief lint, declared scope, stale base, context preamble |
-| [agy-bridge](references/agy.md) | queued and delegated file reviews, manifests, exit codes |
+| [agy-bridge](references/agy.md) | setup, queued and delegated file reviews, manifests, exit codes |
 | [Cloud batches](references/cloud.md) | Claude Code on the web: pushed briefs, envelopes and report collection |
 | [Task status](references/job-status.md) | states, `status` filters and JSON, explicit refresh |
 | [Configuration](references/configuration.md) | every `.agents/config.json` key |

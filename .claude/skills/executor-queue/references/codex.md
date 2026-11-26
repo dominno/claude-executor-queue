@@ -15,24 +15,13 @@ Doctor prints the resolved `CC` and `AGYB` paths as shell assignments. On Window
 prints PowerShell syntax such as `$CC='C:\path\to\codex-companion.mjs'`. For Git
 Bash, use the same path with Bash assignment syntax, such as
 `CC='C:/path/to/codex-companion.mjs'`. Keep `"$CC"` quoted in every call.
-For agy, doctor first looks for agy-bridge installed as a skill, in this order: `.claude/skills/agy-bridge/scripts/agy-bridge`
-and `.agents/skills/agy-bridge/scripts/agy-bridge` in the project, then the same two paths under `~`; it prints the
-location it used. Otherwise, and always for the Codex companion,
-doctor uses `installed_plugins.json` and selects project or local entries for the current checkout.
-It reads the marketplace cache for older profiles without an installed-plugin registry. The legacy
-`agy@agy-bridge-local` is checked after `agy@agy-bridge`. `CLAUDE_CONFIG_DIR` selects the profile.
+For the Codex companion doctor uses `installed_plugins.json` and selects project or local entries for the current
+checkout. It reads the marketplace cache for older profiles without an installed-plugin registry.
+`CLAUDE_CONFIG_DIR` selects the profile. agy setup and discovery: [agy setup](agy.md#setup).
 
 - Codex: `npm install -g @openai/codex`, `codex login` (or `codex login --device-auth`), then
   `/plugin marketplace add openai/codex-plugin-cc`, `/plugin install codex@openai-codex`, `/codex:setup`.
-- agy CLI: follow [Google's installation instructions](https://antigravity.google/docs/cli-using).
-  Check `agy --version`, sign in on the first interactive run, then run `agy models`. agy-bridge exit 11 means
-  missing login. The bridge requires Python 3.9+ on macOS or Linux.
-- agy-bridge: `npx skills add dominno/claude-agy-bridge --skill agy-bridge -a claude-code -a codex` (add `-g` for
-  every project, or pass a local clone path), or the Claude Code plugin: `/plugin marketplace add dominno/claude-agy-bridge`
-  and `/plugin install agy@agy-bridge`. Either install is discovered automatically; rerun doctor afterwards. For agy, xq uses the installed
-  bridge's own `doctor` command to check CLI compatibility and authentication.
-  Queue integration requires **both** `queue --help` and `verdict --help` to succeed. Those probes distinguish
-  builds that share a version number. If either fails, update agy-bridge (`npx skills update` or `/plugin update agy@agy-bridge`) and rerun doctor.
+  Check with `xq.py doctor --need codex` (online: it also confirms the default model is usable on the account).
 
 Installation or authentication is a user action; do not change shell profiles or install with elevated rights.
 

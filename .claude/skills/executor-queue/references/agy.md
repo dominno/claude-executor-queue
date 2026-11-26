@@ -1,11 +1,34 @@
 # agy review recipes
 
-Run `xq.py init`, then `xq.py doctor --need agy`. The bridge requires Python 3.9+ on macOS or Linux.
+## Setup
+
+agy is Google Antigravity's CLI; xq talks to it only through [agy-bridge](https://github.com/dominno/claude-agy-bridge),
+which checks every file before it is sent. Installation and sign-in are user actions.
+
+1. Install the agy CLI (macOS or Linux): `curl -fsSL https://antigravity.google/cli/install.sh | bash`
+   (binary in `~/.local/bin/agy`, keep that folder on `PATH`), then `agy --version`.
+2. Sign in once: run `agy`, open the printed link, sign in with your Google account, paste the code back, then `/exit`.
+   `agy models` should list models. agy-bridge exit 11 later means a missing login.
+3. Install agy-bridge (Python 3.9+): `npx skills add dominno/claude-agy-bridge --skill agy-bridge -a claude-code -a codex`
+   (add `-g` for every project, or pass a local clone path), or the Claude Code plugin:
+   `/plugin marketplace add dominno/claude-agy-bridge` and `/plugin install agy@agy-bridge`.
+4. Run `xq.py init`, then `xq.py doctor --need agy`. It prints `AGYB=<path to the bridge script>`; use that path
+   in every command below. `--offline` skips the bridge's model-access check, so sign-in stays unverified.
+
+Doctor first looks for agy-bridge installed as a skill, in this order: `.claude/skills/agy-bridge/scripts/agy-bridge`
+and `.agents/skills/agy-bridge/scripts/agy-bridge` in the project, then the same two paths under `~`, and prints the
+location it used. Otherwise it reads `installed_plugins.json` (`agy@agy-bridge`, then the legacy
+`agy@agy-bridge-local`). It runs the installed bridge's own `doctor` to check CLI compatibility and sign-in. Queue
+integration requires **both** `queue --help` and `verdict --help` to succeed, which distinguishes builds that share a
+version number; if either fails, update agy-bridge (`npx skills update` or `/plugin update agy@agy-bridge`) and rerun
+doctor.
+
+## Single review
+
 Use `xq.py poll --id <id>` to refresh one registered review from local artifacts. [Status and refresh commands](job-status.md)
 `doctor --need agy` runs the installed bridge's diagnostics, including its network check for model access.
 Use `xq.py doctor --need agy --offline` for local checks. A successful offline check confirms local setup
 while sign-in and model access remain unverified.
-See the [agy-bridge setup instructions](codex.md#setup) (skill or plugin install).
 `xq.py` means the installed helper; `$root` is the absolute primary checkout,
 `$wt` its review worktree and `$rb` the recorded review base SHA
 (`rb=$(xq.py status --id <id> --field review_base)`, which falls back to `base`; never the moving branch).
