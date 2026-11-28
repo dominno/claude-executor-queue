@@ -1,6 +1,7 @@
 """Capacity admission: host resource readings and per-executor slot checks (CORE)."""
 
 import os
+import re
 import shutil
 import tempfile
 
@@ -18,6 +19,57 @@ def resource_readings(root):
     return dict(load=load, cpus=os.cpu_count() or 1,
                 repo_free_gb=shutil.disk_usage(root).free / 1024**3,
                 temp_free_gb=shutil.disk_usage(tempfile.gettempdir()).free / 1024**3)
+
+
+GIB = 1024 ** 3
+# Optional memory admission keys (GiB); absent means no memory check.
+MEMORY_KEYS = frozenset(('max_swap_gb', 'min_free_mem_gb'))
+
+
+def parse_swapusage(text):
+    """GiB of swap in use from macOS `sysctl -n vm.swapusage` ("total = 2048.00M  used = 1024.50M  free = ...")."""
+    match = re.search(r'used\s*=\s*([0-9]+(?:\.[0-9]+)?)([KMGT])', text)
+    if not match:
+        raise ValueError('unrecognized vm.swapusage output')
+    return float(match.group(1)) * 1024 ** 'KMGT'.index(match.group(2)) * 1024 / GIB
+
+
+def parse_vm_stat(text):
+    """GiB of memory available without swapping from macOS `vm_stat`: (free + inactive + speculative) pages."""
+    size = re.search(r'page size of ([0-9]+) bytes', text)
+    pages = dict(re.findall(r'^Pages (free|inactive|speculative):\s+([0-9]+)\.?\s*$', text, re.M))
+    if not size or not {'free', 'inactive'} <= set(pages):
+        raise ValueError('unrecognized vm_stat output')
+    return sum(int(value) for value in pages.values()) * int(size.group(1)) / GIB
+
+
+def parse_meminfo(text):
+    """{'available_gb', 'swap_used_gb'} from Linux /proc/meminfo (values in kB, meaning KiB)."""
+    values = {key: int(value) for key, value in re.findall(r'^(\w+):\s+([0-9]+) kB\s*$', text, re.M)}
+    if not {'MemAvailable', 'SwapTotal', 'SwapFree'} <= set(values):
+        raise ValueError('/proc/meminfo has no MemAvailable/SwapTotal/SwapFree')
+    return dict(available_gb=values['MemAvailable'] * 1024 / GIB,
+                swap_used_gb=(values['SwapTotal'] - values['SwapFree']) * 1024 / GIB)
+
+
+def memory_admission(data, reasons, details):
+    """Refuse when swap in use is above max_swap_gb or available memory is below min_free_mem_gb (GiB)."""
+    try:
+        memory = seams.memory_readings()
+    except (OSError, ValueError) as exc:
+        reasons.append('memory readings unavailable: ' + str(exc))
+        return
+    if memory is None:
+        details.append('SKIP memory check: no memory probe for this platform (macOS and Linux only)')
+        return
+    for key, reading, label, refused in (
+            ('max_swap_gb', 'swap_used_gb', 'swap used {:.2f} GiB (max {:.2f})', lambda value, limit: value > limit),
+            ('min_free_mem_gb', 'available_gb', 'memory available {:.2f} GiB (min {:.2f})',
+             lambda value, limit: value < limit)):
+        if key in data:
+            details.append(label.format(memory[reading], data[key]))
+            if refused(memory[reading], data[key]):
+                reasons.append(details[-1])
 
 
 def preflight_status(root, tasks, data):
@@ -40,6 +92,8 @@ def preflight_status(root, tasks, data):
                 reasons.append(details[-1])
     except OSError as exc:
         reasons.append('resource readings unavailable: ' + str(exc))
+    if MEMORY_KEYS & set(data):
+        memory_admission(data, reasons, details)
     samples = {}
     try:
         live = seams.live_process_counts(samples)

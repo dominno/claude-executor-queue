@@ -19,6 +19,18 @@ SHA_RE = re.compile(r'^[0-9a-f]{7,64}$')
 OPTION_RE = re.compile(r'^[A-Za-z0-9._:-]{1,64}$')
 
 
+DURATION_RE = re.compile(r'([0-9]+(?:\.[0-9]+)?)([smh]?)')
+
+
+def duration_seconds(value):
+    """Seconds in a duration such as 30s, 10m or 1h (a bare number is seconds); None when invalid or not positive."""
+    match = DURATION_RE.fullmatch(value.strip())
+    if not match:
+        return None
+    seconds = float(match.group(1)) * {'': 1, 's': 1, 'm': 60, 'h': 3600}[match.group(2)]
+    return seconds if 0 < seconds < float('inf') else None
+
+
 def fail(message):
     raise SystemExit('xq: ' + message)
 

@@ -32,6 +32,19 @@ xq.py import --from old/tasks.jsonl --map '{"id": "task_id", "executor": "agent"
   `brief` and `ts` (a zoned ISO timestamp) are optional. `status_values` maps source values to
   `done|failed|running|queued|closed`; an unmapped value outside that set makes the line malformed. Put the same
   object under `"import_map"` in the config to omit `--map`.
+- To keep verifier and merge history, also map `event` (the source key naming what happened; `event_values` maps its
+  values to `assign|finish|verify|merge|close`), `verdict` (`pass|fixes|reject`), `by` (the reader), `commit` (the
+  merge commit, a 7-64 character hex SHA), `model` and `effort`. An unmapped event or an invalid verdict or commit
+  makes the line malformed; invalid `by`, `model` or `effort` values are dropped. The line's `ts` becomes
+  `assigned_at` (assign), `finished_at` (finish), `verified_at` (a line with a verdict) or `merged_at` (a line with
+  a commit); an imported assign starts a new attempt and clears the earlier verdict, merge and finish. Without these
+  keys, import behaves as before.
+
+  ```json
+  {"id": "task", "status": "state", "ts": "at", "event": "kind", "verdict": "verdict", "by": "reader",
+   "commit": "merge_sha", "event_values": {"started": "assign", "ended": "finish", "checked": "verify",
+   "landed": "merge"}}
+  ```
 - Each source line becomes one `import` event carrying `imported: {source, line, sha256}` (sha256 of the raw line;
   a leading UTF-8 BOM is tolerated).
   Several lines for one id replay in order; `closed` closes the task and keeps its last status.
@@ -40,7 +53,7 @@ xq.py import --from old/tasks.jsonl --map '{"id": "task_id", "executor": "agent"
   `xq: <source> line N: <reason>; skipped`; the good lines are still imported and the exit code is 1.
   `--dry-run` prints the same report and writes nothing.
 
-Imported tasks are history. `status` marks them `IMPORTED` (`status --json`: `"imported": true`,
-`"source_executor"`, and `executor: null`); they never occupy an executor slot, never count as stale or open, and
+Imported tasks are history. `status` marks them `IMPORTED` with any imported verdict, reader and merge commit
+(`status --json`: `"imported": true`, `"source_executor"`, `executor: null` and the lifecycle fields); they never occupy an executor slot, never count as stale or open, and
 never make the Stop hook block. `poll --id` (with or without `--wait`), `finish`, `verify`, `merge`, `ack` and
 `close` refuse them, and `assign` refuses their id and `--follows <imported id>`: record new work under a fresh id.

@@ -28,7 +28,7 @@ at 125 lines or fewer and links only inside the skill directory.
   means subclassing `ExecutorAdapter`, registering it there and adding its name to `EXECUTORS`.
 - **CLI** (`executor_queue/cli/`) holds the argparse parser (`parser.py`), the entry point (`main.py`) and the
   `cmd_*` handlers by area in `commands/`: `setup.py` (doctor, preflight, init, import, assign, brief-lint, compose),
-  `record.py` (finish, verify, merge, ack, close), `read.py` (status, hook, pause) and `executors.py` (poll, agy-sync,
+  `record.py` (finish, verify, merge, ack, close), `read.py` (status, events, hook, pause) and `executors.py` (poll, agy-sync,
   cloud-envelope, cloud-collect). Nothing imports the CLI.
 
 CORE reaches the runner and executor-specific behaviour only through `core/seams.py` (`seams.git`,

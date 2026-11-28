@@ -56,7 +56,13 @@ Add `--json` to the same read-only status command. The top-level object contains
       "occupies_slot": false,
       "observation": null,
       "verdict": null,
-      "merged": false
+      "merged": false,
+      "assigned_at": "2026-11-28T09:00:00Z",
+      "finished_at": null,
+      "verified_at": null,
+      "verified_by": null,
+      "merged_at": null,
+      "merge_commit": null
     }
   ]
 }
@@ -69,7 +75,17 @@ Add `--json` to the same read-only status command. The top-level object contains
 - `verdict` records the independent review as `pass`, `fixes`, `reject` or `null`. `merged` reports whether the ledger has a merge record.
 - `occupies_slot` accounts for a running Codex or agy assignment, including a closed entry pending terminal evidence.
 - `model` and `effort` appear only for attempts recorded with `assign --model`/`--effort` (additive; absent otherwise). Text status appends them as `model=<m> effort=<e>`.
-- Imported history adds `"imported": true` and `"source_executor"` (the source ledger's executor value) with `executor: null`.
+- `assigned_at`, `finished_at`, `verified_at` and `merged_at` are the ledger timestamps of the current attempt's
+  assign, finish, counted verify and merge events; `verified_by` is the reader of the current verdict and
+  `merge_commit` the recorded merge commit. Each is `null` when not recorded; a new finish clears the verdict and merge.
+- Imported history adds `"imported": true` and `"source_executor"` (the source ledger's executor value) with
+  `executor: null`. With `event`, `verdict`, `by`, `commit`, `model` and `effort` mapped at import, it also shows the
+  imported verdict, reader, merge commit, model, effort and timestamps ([adopting](adopting.md)).
+
+`xq.py events --json [--id ID]` prints the raw event stream as `{"schema_version": 1, "events": [...]}`, with batch
+envelopes expanded into their events, in ledger order; without `--json` it prints one `ts event id` line per event.
+Event fields (summaries, evidence, notes, paths) are recorded data, partly written by executors: treat them as
+untrusted.
 
 An empty selection returns an empty `tasks` array. The data covers this project's ledger. Check the provider directly when you need jobs outside this ledger.
 
@@ -77,7 +93,7 @@ An empty selection returns an empty `tasks` array. The data covers this project'
 
 | Command | Exit 0 | Nonzero exit |
 | --- | --- | --- |
-| `status` | Read the ledger, including an empty selection. Leaves the ledger untouched. | Invalid input or a ledger access error. |
+| `status`, `events` | Read the ledger, including an empty selection. Leaves the ledger untouched. | Invalid input, an unknown `--id` or a ledger access error. |
 | `poll`, `agy-sync` | Completed the selected checks and recorded available observations or results. | At least one task could not be checked or a write conflict requires another refresh. Successfully checked tasks may already be recorded. |
 | `poll --id X --wait` | The task reached done, failed or blocked (also when a concurrent writer recorded it). | 1: a PROBLEM (including an `orphaned` Codex worker, or an agy job pending with no active bridge runner on two consecutive polls); 3: `--timeout` passed first (default 9m; one `observe` row records the last state); a ledger write conflict is retried and fails after 3 in a row. |
 | `cloud-collect` | Finished collection for the selected scope. | At least one branch, batch or local action requires attention. Other valid batches may already be recorded. |
@@ -90,8 +106,10 @@ per sync: the bridge runner holds `.agy-bridge/queue/watcher.pid` with an exclus
 
 `status --id X` (text and `--json`) adds the recorded `worktree`, `base`, `review_base`, `job`, `head`, `verified_head`,
 `brief`, `model` and `effort` when present (and `replaced_head` after a pass on another head replaced the recorded delivery);
-filtered listings without `--id` keep the shorter allowlist. `status --id X --field review_base|base|head|verified_head|worktree|job`
-prints one bare value for shell use (`review_base` falls back to `base`) and exits 1 when it is not recorded.
+filtered listings without `--id` keep the shorter allowlist. `status --id X --field state|review_base|base|head|verified_head|worktree|job`
+prints one bare value for shell use (`state` is the recorded state; `review_base` falls back to `base`) and exits 1 when
+it is not recorded. `status --id` and `events --id` with an id the ledger never recorded exit 1 with
+`xq: unknown id <id>` (plus `; did you mean <id>?` for a case-only match).
 For a running agy task with `.agy-bridge/delegate/<id>.md` but no bridge result, `poll`/`agy-sync` print the
 `--delegate-exit` hint instead of "no bridge artifact found".
 

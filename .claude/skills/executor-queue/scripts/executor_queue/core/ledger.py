@@ -228,6 +228,12 @@ def apply_observation(task, observation):
         task['observation'] = {key: observation[key] for key in fields}
 
 
+# A finish starts a fresh delivery: it clears the previous verdict, merge and delivery evidence.
+FINISH_CLEARS = ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256',
+                 'verified_at', 'merged_at', 'delegate_exit', 'result', 'head', 'delivery_base', 'tests',
+                 'observation', 'replaced_head', 'not_sent', 'refusal', 'ran_before_promote')
+
+
 def replay_events(rows):
     tasks = {}
     for e in rows:
@@ -251,9 +257,7 @@ def replay_events(rows):
             if kind == 'verify' and t.get('status') in ('running', 'queued'):
                 continue  # Forced early audit events never approve a delivery.
             if kind == 'finish':
-                for key in ('verdict', 'by', 'evidence', 'merged', 'commit', 'verified_head', 'report', 'report_sha256',
-                            'delegate_exit', 'result', 'head', 'delivery_base', 'tests', 'observation',
-                            'replaced_head', 'not_sent', 'refusal', 'ran_before_promote'):
+                for key in FINISH_CLEARS:
                     t.pop(key, None)
                 if not e.get('preserve_closed'):
                     # Historical forced finishes reopened the task.
@@ -271,6 +275,7 @@ def replay_events(rows):
                     e.get('verdict') != 'pass' or e.get('verified_head') != t.get('verified_head')):
                 t.pop('merged', None)
                 t.pop('commit', None)
+                t.pop('merged_at', None)
             t.update({k: v for k, v in e.items() if k not in ('event', 'ts', 'id', 'preserve_closed', 'observation')})
             if kind == 'finish':
                 t['finished'] = e.get('ts', '')
@@ -283,18 +288,40 @@ def replay_events(rows):
                 t['closed'] = e.get('ts', '')
             elif kind == 'merge':
                 t['merged'] = e.get('commit')
+                t['merged_at'] = e.get('ts', '')
+            elif kind == 'verify':
+                t['verified_at'] = e.get('ts', '')
     return tasks
+
+
+IMPORT_TASK_FIELDS = ('source_executor', 'brief', 'imported', 'model', 'effort')
+IMPORT_ATTEMPT_FIELDS = ('verdict', 'by', 'merged', 'finished', 'verified_at', 'merged_at', 'closed')
 
 
 def apply_import(tasks, e):
     """Replay one imported history line. It never rewrites a task xq recorded itself; 'closed' closes the task
-    and keeps its last imported status."""
+    and keeps its last imported status. An imported assign starts a new attempt (clears verdict, merge and finish);
+    verdict/by and commit (the merge commit) are recorded with the line's ts as verified_at/merged_at."""
     if e['id'] in tasks and not tasks[e['id']].get('imported'):
         return
     t = tasks.setdefault(e['id'], {'id': e['id']})
-    t.update({key: e[key] for key in ('source_executor', 'brief', 'imported') if key in e})
-    if e.get('status') == 'closed':
-        t['closed'] = e.get('ts', '')
+    kind, ts = e.get('import_event'), e.get('ts', '')
+    if kind == 'assign':
+        for key in IMPORT_ATTEMPT_FIELDS:
+            t.pop(key, None)
+        t['assigned'] = ts
+    t.update({key: e[key] for key in IMPORT_TASK_FIELDS if key in e})
+    if kind == 'finish':
+        t['finished'] = ts
+    if 'verdict' in e:
+        t.update(verdict=e['verdict'], verified_at=ts)
+        t.pop('by', None)
+    if 'by' in e:
+        t['by'] = e['by']
+    if 'commit' in e:
+        t.update(merged=e['commit'], merged_at=ts)
+    if e.get('status') == 'closed' or kind == 'close':
+        t['closed'] = ts
     elif e.get('status'):
         t['status'] = e['status']
 

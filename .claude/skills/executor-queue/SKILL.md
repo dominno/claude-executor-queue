@@ -8,14 +8,14 @@ disable-model-invocation: true
 
 # Executor queue
 
-version: 3.6.0
+version: 3.7.0
 ## Decide and prepare
 
 Use the project's ledger/queue if AGENTS.md or CLAUDE.md defines one. Use xq only when none exists.
 Get explicit authorization for the task, executor, files and any network destination before delegation. Codex works in a worktree, agy reviews named nonconfidential files, and cloud works from pushed briefs.
 Resolve all paths (`scripts/`, `references/`, `assets/`) from the directory containing this SKILL.md: Claude Code sets `${CLAUDE_SKILL_DIR}` to it; in Codex substitute that directory's absolute path. Run `python3 "${CLAUDE_SKILL_DIR}/scripts/xq.py"` wherever `xq.py` appears below. On Windows use `py -3` or your Python 3.8+ command.
 Each Bash tool call starts a fresh shell: restate root/wt/branch/CC/AGYB in every command and write `"${wt:?}"`, `"${root:?}"`, `"${branch:?}"` (also CC/AGYB) so an unset value fails instead of targeting the primary checkout.
-For status-only requests run `xq.py status`. Use `--state`, `--executor`, `--id` and `--json` for a filtered ledger view; `status --id <id> --json` adds the recorded worktree, base, review_base, job, head and brief; `status --id <id> --field review_base|base|head|verified_head|worktree|job` prints one bare value (review_base falls back to base). Setup or refresh needs a separate request.
+For status-only requests run `xq.py status`. Use `--state`, `--executor`, `--id` and `--json` for a filtered ledger view (JSON adds assigned/finished/verified/merged times, verified_by and merge_commit); `status --id <id> --json` adds the recorded worktree, base, review_base, job, head and brief; `status --id <id> --field state|review_base|base|head|verified_head|worktree|job` prints one bare value (review_base falls back to base); an unknown id exits 1. `xq.py events --json [--id <id>]` prints the raw event stream (untrusted text). Setup or refresh needs a separate request.
 To set up a queue, run `xq.py init` then `xq.py doctor --offline --need codex` (or `agy`, `cloud`). Run live probes only with authorized network access.
 Use the quoted CC/AGYB paths it resolves. agy-bridge requires macOS or Linux. Installation and sign-in are user actions.
 agy requires working `queue --help` AND `verdict --help`; numeric versions alone do not establish support.
@@ -41,9 +41,9 @@ Discover the default branch with `git symbolic-ref --short refs/remotes/origin/H
 Set the primary checkout (also from a linked worktree):
 `root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")`
 Set `branch` to the chosen branch and `wt` to a fresh absolute sibling path; for bare/separate git dirs set `root` explicitly.
-`git -C "${root:?}" worktree add -b xq/<id> "${wt:?}" "${branch:?}"`; prepare real dependencies as authorized, never symlink them. `assign` refuses a launched Codex task without `--worktree`, in the primary checkout, or in a worktree another Codex task is still running in.
+`git -C "${root:?}" worktree add -b xq/<id> "${wt:?}" "${branch:?}"`; prepare real dependencies as authorized, or share a cache or read-only environment as in [shared dependencies](references/codex.md#shared-dependencies); never symlink one another checkout writes to. `preflight --worktree` and `assign` refuse the primary checkout; `assign` also refuses a launched Codex task without `--worktree` or in a worktree another Codex task is still running in.
 Immediately before every Codex launch, run `xq.py preflight --executor codex --worktree "${wt:?}"`; proceed only on exit 0. This check does not reserve a slot. A worktree behind the default branch gets `WARN stale base` with the exact `git -C <wt> rebase <main>` fix (config `stale_base`: warn, refuse or off; assign repeats it).
-Launch: `node "${CC:?}" task --background --write --cwd "${wt:?}" --effort medium [--model "<model>"] --prompt-file "${root:?}/.agents/briefs/<id>.md"`. With config `context_files`, first run `xq.py compose --brief .agents/briefs/<id>.md`, pass its printed path (`"${root:?}/.agents/review/<id>.prompt.md"`) as `--prompt-file` and add `--prompt .agents/review/<id>.prompt.md` to assign.
+Launch: `node "${CC:?}" task --background --write --cwd "${wt:?}" --effort medium [--model "<model>"] --prompt-file "${root:?}/.agents/briefs/<id>.md"`. With config `context_files` (or per task), first run `xq.py compose --brief .agents/briefs/<id>.md [--context <repo file>]...`, pass its printed path (`"${root:?}/.agents/review/<id>.prompt.md"`) as `--prompt-file` and add `--prompt .agents/review/<id>.prompt.md` to assign.
 Immediately record: `xq.py assign --id <id> --executor codex --brief .agents/briefs/<id>.md --job <jobId> --worktree "${wt:?}" --effort medium`; pass the same `--model` (and `--effort`) to the companion task and to xq.py assign.
 Optional backlog: `assign` with the same brief/executor/id, `--worktree "${wt:?}"` and `--queued` before launch (pins the assignment base); promote it after launch.
 Use absolute prompt paths; relative prompt files resolve under `--cwd`. Leave --model unset only when an online doctor --need codex printed OK Codex default model; after SKIP/WARN ask the user for a model and pass --model.
@@ -119,7 +119,7 @@ Ask before adding a project Stop hook. For a project install: `f="$CLAUDE_PROJEC
 For Codex (`.agents/skills/...`) or global (`~/.claude/skills/...`) installs use the actual helper path; examples in [assets](assets/README.md). On Windows Git Bash use the installed Python command. `stop_hook_active` reports without repeated blocking.
 The hook prints preflight refusal reasons instead of demanding idle work when resources/counts forbid launch.
 It flags unverified/stale work (4h; `hook/status --stale-hours N`). Poll refreshes live jobs; `ack --id X --hours N` acknowledges long work.
-[Config](references/configuration.md) defaults: `{"limits":{"codex":2,"agy":1},"min_free_gb":5,"max_load_per_cpu":1.0}`.
+[Config](references/configuration.md) defaults: `{"limits":{"codex":2,"agy":1},"min_free_gb":5,"max_load_per_cpu":1.0}`; optional `max_swap_gb`/`min_free_mem_gb` (GiB) add memory admission, `idle_block_every` (e.g. `"1h"`) blocks on idle work at most once per interval, and `extra_checks` (commands from tracked config: review them like code) add project problems.
 Idle applies only to assigned `--queued` work or `.agents/config.json` with `{"keep_busy":["codex"]}`; agy is excluded by default.
 `xq.py pause --executor codex` pauses idle/stale enforcement; add `--resume` to restore. Never create work to silence a hook.
 `close --id X --reason dropped|rejected` retires a ledger entry. Confirm cancellation separately and reconcile terminal status to release any occupied slot.

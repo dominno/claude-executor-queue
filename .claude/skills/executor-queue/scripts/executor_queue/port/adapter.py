@@ -59,6 +59,8 @@ class ExecutorAdapter:
       worktree_base(root, worktree)                     the worktree's current base commit (what a fresh assignment
                                                         records; the stale-base check tests it), refusing a
                                                         foreign checkout; None: no worktree deliveries
+      preflight_worktree(root, worktree)                (refusals, warnings) for preflight --worktree before the
+                                                        stale-base check (Codex: the primary checkout is refused)
       check_merge_head(root, task, head)                refuse a merge whose verified head is not the delivery
       split_status_commits(root, extra)                 (commits to review, status-only commits) beyond head
       doctor_checks(root, a, check, settings)           doctor lines for --need <name>
@@ -157,6 +159,10 @@ class ExecutorAdapter:
     @staticmethod
     def worktree_base(root, worktree):
         return None
+
+    @staticmethod
+    def preflight_worktree(root, worktree):
+        return [], []
 
     @staticmethod
     def check_merge_head(root, task, head):

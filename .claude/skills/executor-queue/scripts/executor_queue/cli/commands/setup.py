@@ -29,9 +29,15 @@ def preflight_worktree(root, a):
     if not path.is_absolute() or not path.is_dir():
         fail('--worktree "{}" must be an existing absolute directory'.format(display_name(a.worktree)[:200]))
     worktree = str(path.resolve())
-    base = ADAPTERS[a.executor].worktree_base(root, worktree)
-    if base is None:
+    adapter = ADAPTERS[a.executor]
+    if not adapter.worktree_delivery:
         fail('--worktree applies only to an executor whose delivery is a worktree commit')
+    refusals, warnings = adapter.preflight_worktree(root, worktree)
+    for warning in warnings:
+        print('WARN ' + warning)
+    if refusals:
+        return refusals
+    base = adapter.worktree_base(root, worktree)
     mode, message = stale_base_finding(root, worktree, base)
     if message and mode == 'refuse':
         return [message]
@@ -241,7 +247,8 @@ def cmd_compose(a):
     root = ledger.repo_root()
     brief = brief_argument(root, a.brief)
     name = brief_relative(root, brief) or str(brief)
-    text = compose_prompt(root, read_brief_text(brief), name, config(root).get('context_files', []))
+    text = compose_prompt(root, read_brief_text(brief), name, config(root).get('context_files', []),
+                          a.context or ())
     out = Path(a.out) if a.out else root / '.agents/review' / (brief.stem + '.prompt.md')
     out = out if out.is_absolute() else root / out
     refusal = compose_out_refusal(root, out)

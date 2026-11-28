@@ -48,8 +48,11 @@ No executor receives permission for paid calls, network, push or merge merely by
    `assign` refuses a launched (non-`--queued`) Codex task without `--worktree`, and so does promoting a queued one;
    `--force` records an explicit exception.
    On retry use a fresh id or `-r2` branch/path; inspect existing worktrees first. Prepare real dependencies there
-   (`pnpm install --frozen-lockfile`, `uv sync`, as appropriate and authorized); never symlink dependencies.
+   (`pnpm install --frozen-lockfile`, `uv sync`, as appropriate and authorized), or share them the safe way described
+   in [shared dependencies](#shared-dependencies); never symlink a dependency tree that another checkout writes to.
 3. Immediately before every Codex launch (including retries/resumes), run preflight and proceed only on exit 0.
+   `preflight --worktree` refuses the primary checkout with the same message `assign` gives (`Codex must not run in
+   the primary checkout ...`), so the order preflight, launch, assign never leaves a running job that assign refuses.
    Use the `CC` from doctor:
    ```sh
    python3 "$xq" preflight --executor codex --worktree "$wt" || exit $?
@@ -219,6 +222,29 @@ Fix loop (`task --resume-last` works only within the same Claude session):
 6. Only then `xq.py close --id <id> --reason superseded-by:<id>-fix1` (the target must already be in the ledger).
 A retry needs fresh verification.
 
+## Shared dependencies
+
+Each worktree normally gets its own installed dependencies. Installing them again per task can be slow or large, so
+two ways to share them are allowed:
+
+- **A shared package cache** (preferred). Point every worktree's installer at one cache outside the trees, such as
+  pnpm's content-addressable store, `uv`'s cache (`UV_CACHE_DIR`), `pip`'s wheel cache or `npm ci --cache <dir>`. Each
+  worktree still gets its own real `node_modules`/`.venv`, built from the cache with hard links or copies, so a
+  task cannot change another checkout's environment.
+- **A read-only environment outside the tree, linked in.** Build one virtualenv or `node_modules` outside every
+  checkout (for example `../deps/<lockfile hash>/.venv`) from the default branch's lockfile, make it read-only
+  (`chmod -R a-w`), and symlink it into the worktree as `.venv` or `node_modules`.
+  `preflight --worktree` prints `WARN shared dependency <name> is a symlink to <target>` for such a link and still
+  admits the launch.
+
+Why a plain symlink to the primary checkout's environment is unsafe: a task that installs or upgrades a package
+writes through the link into the environment every other checkout uses, and the lead's own checks then run code the
+task changed. The Codex write sandbox confines writes to the worktree, but the lead's checks run outside it.
+Keep the shared copy read-only, rebuild it when the lockfile changes (a task that changes the lockfile needs its own
+real install), and ignore the link without a trailing slash: `.venv` and `node_modules` in `.gitignore`, because the
+pattern `.venv/` matches only a directory and Git sees a symlink as a file. A symlink the task commits is still listed
+as `WARN SENSITIVE` at verify.
+
 ## Job state location
 
 The companion keeps job state under `$CLAUDE_PLUGIN_DATA` when set (Claude Code sessions with the Codex plugin
@@ -250,7 +276,8 @@ executor count reaches its limit. Windows skips load with a printed note; disk a
 count checks still apply. Probe failures refuse launch. Doctor prints all readings.
 The Stop hook prints refusal reasons instead of demanding work from an idle executor;
 verification and stale-work checks still apply. Both preflight and hook are read-only
-and take no ledger lock. This is a point-in-time check, not a slot reservation; the lead
+and take no ledger lock (with config `idle_block_every` the hook writes only its
+`.agents/hook-idle.stamp`). This is a point-in-time check, not a slot reservation; the lead
 must serialize launch decisions across sessions to avoid simultaneous-launch races.
 The bridge drains all pending jobs when `queue run` starts. Confirm the whole pending set before launch.
 See the [agy review recipe](agy.md#queued-reviews).
@@ -269,9 +296,28 @@ or `queue run`. Shells, substring matches, bridge queue-add/status and companion
 are excluded. Wrappers and their live children can both count, deliberately erring on
 the side of refusing another launch. Renamed executables and unrelated/custom launchers
 may be missed; ledger counts cover recorded tasks. No executor is started or queried.
-Tests inject `resource_readings(root)` and `live_process_counts()`; matcher tests inject
+Tests inject `resource_readings(root)`, `memory_readings()` and `live_process_counts()`; matcher tests inject
 `process_rows()` pairs of `(executable_name, command_line)`. There is no environment
 variable that disables the guard.
+
+### Memory admission
+
+Two optional keys (absent by default: no memory check) refuse a launch on a host that is already swapping:
+
+```json
+{"max_swap_gb": 2, "min_free_mem_gb": 4}
+```
+
+Both are finite nonnegative numbers of GiB (1024³ bytes); boundaries are inclusive. Preflight prints
+`swap used X GiB (max Y)` and `memory available X GiB (min Y)` and refuses when swap in use is above
+`max_swap_gb` or available memory is below `min_free_mem_gb`.
+
+- macOS: swap in use is the `used` value of `sysctl -n vm.swapusage` (its `M` suffix is MiB); available memory is
+  (`Pages free` + `Pages inactive` + `Pages speculative`) × the page size printed by `vm_stat`.
+- Linux: available memory is `MemAvailable`, swap in use is `SwapTotal - SwapFree`, from `/proc/meminfo` (its `kB` is
+  KiB).
+- Other platforms (Windows, BSD) print `SKIP memory check: no memory probe for this platform` and admit.
+- A probe that fails or prints something unexpected on macOS or Linux refuses (`memory readings unavailable: ...`).
 
 ## Brief lint
 
@@ -367,6 +413,8 @@ Entries must be repo-relative regular files: absolute paths, `..`, symlinks and 
 file is an error naming it. `xq.py compose --brief .agents/briefs/<id>.md [--out <path>]` writes each context file
 between `===== BEGIN xq context <path> sha256:<12 hex> =====` and `===== END xq context <path> =====` lines, then the
 brief between the same `brief` delimiters, to `.agents/review/<brief stem>.prompt.md` (private, excluded by `init`)
-and prints the path. `--out` never targets xq state or `.agents/config.json`, and overwrites an existing file only
+and prints the path. Add task-specific files with `--context <repo-relative file>` (repeatable): they follow the
+configured `context_files` in the order given, under the same rules (no absolute path, `..`, symlink or missing file),
+and a file already included is not repeated. `--out` never targets xq state or `.agents/config.json`, and overwrites an existing file only
 when it is a `*.prompt.md`. compose writes nothing to the ledger; `assign --prompt <path>` records `prompt` and the full
 `prompt_sha256` of the file actually launched, so the launched input stays traceable after the context files change.

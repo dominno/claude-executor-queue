@@ -1,6 +1,42 @@
 # Changelog
 
-## Unreleased
+## v3.7 — 3.7.0 — 2026-11-28
+
+Everything below, including the earlier Unreleased entries, ships as 3.7.0.
+
+### Added: out-of-the-box adoption
+- `preflight --executor codex --worktree <primary checkout>` refuses with the message `assign` gives (`Codex must not
+  run in the primary checkout ...`), so preflight, launch, assign cannot strand a running job. preflight also prints
+  `WARN shared dependency <name> is a symlink to <target>` for a symlinked top-level dependency tree (`.venv`,
+  `node_modules`, ...) and still admits it (adapter operation `preflight_worktree`).
+- `compose --context <repo-relative file>` (repeatable) adds per-task context after the configured `context_files`,
+  with the same rules (no absolute path, `..`, symlink or missing file); a file already included is not repeated.
+- Optional memory admission keys `max_swap_gb` and `min_free_mem_gb` (GiB; absent = no check): macOS reads
+  `sysctl -n vm.swapusage` and `vm_stat`, Linux `/proc/meminfo`; other platforms print `SKIP memory check`, and a
+  failed probe on macOS/Linux refuses.
+- Config `idle_block_every` (duration): the Stop hook blocks on idle executors at most once per interval, stamped
+  in the private `.agents/hook-idle.stamp` (excluded by `init`); unverified, stale and extra-check problems still
+  block every time. Without the key the hook behaves as before and writes nothing.
+- Config `extra_checks` (commands, no shell) and `extra_checks_timeout` (default `20s`): the Stop hook runs each
+  from the primary checkout and turns every non-empty stdout line into a problem; a failing, missing or timed-out
+  command prints `WARN extra check ...` and never crashes the hook. The commands come from tracked config.
+- `import_map` keys `event` (with `event_values` mapping to assign|finish|verify|merge|close), `verdict`, `by`,
+  `commit`, `model` and `effort`: imported history keeps its verifier, merge commit and timestamps, shown by
+  `status` and `status --json` for IMPORTED tasks. Maps without these keys import exactly as before; re-imports
+  stay idempotent.
+- `status --json` adds `assigned_at`, `finished_at`, `verified_at`, `verified_by`, `merged_at` and `merge_commit` per
+  task (`null` when absent; additive). New `xq.py events [--json] [--id ID]` prints the flattened event stream.
+- `status --id <id> --field state` prints the recorded state.
+
+### Changed
+- `status --id <unknown>` (text, `--json` or `--field`) exits 1 with `xq: unknown id <id>` instead of printing
+  `no tasks` / an empty list; `events --id` does the same.
+- `context file not found` names its origin (`configured in .agents/config.json context_files` or `--context`).
+
+### Docs
+- `references/codex.md`: "Shared dependencies" replaces the bare "never symlink dependencies" with the reasoning and
+  two allowed alternatives (a shared package cache, or a read-only environment outside the tree linked in and
+  ignored without a trailing slash); "Memory admission" documents the probes and units.
 
 ### Docs
 - README: new "Connect your executors" section (Codex, agy, Claude Code on the web: install, sign-in, doctor check)

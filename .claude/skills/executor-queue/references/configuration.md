@@ -11,7 +11,7 @@ config temp files stay local (`xq.py init` excludes them).
 Two examples are included:
 [`assets/config.json`](../assets/config.json) is a minimal opt-in, and
 [`assets/config.full.json`](../assets/config.full.json) lists every key at its default
-(with sample `main`, `context_files` and `import_map` values). Merge either one with any existing config.
+(with sample `main`, `context_files` and `import_map` values; the checks that are off unless set are left out). Merge either one with any existing config.
 
 ## Keys
 
@@ -28,7 +28,15 @@ Two examples are included:
 | `scope_check` | `off`, `warn` or `enforce`; default `warn` | Compares a Codex delivery with the brief's Acceptance `Files:`. `enforce` refuses `verify --verdict pass` unless you pass `--accept-scope "<reason>"`. | [Declared scope](codex.md#declared-scope) |
 | `stale_base` | `off`, `warn` or `refuse`; default `warn` | Warns when a Codex worktree is behind the default branch, at `assign --worktree` and `preflight --worktree`. `refuse` makes `assign` fail unless `--force`, and makes `preflight` exit 1. | [Stale base](codex.md#stale-base) |
 | `ledger` | repo-relative `*.jsonl` path; default `.agents/ledger.jsonl` | Where xq keeps its append-only ledger; the lock sits next to it. A ledger outside `.agents/` is not excluded from Git, so commit it as project history. Absolute paths, `..`, `.git/` and symlinks are refused. | [Adopting](adopting.md) |
-| `import_map` | object; default: absent | The default `--map` for `xq.py import`. It maps xq fields (`id` is required; `executor`, `status`, `brief` and `ts` are optional) to source keys, and `status_values` maps source values to `done`, `failed`, `running`, `queued` or `closed`. | [Adopting](adopting.md#import-the-old-ledger-as-read-only-history) |
+| `import_map` | object; default: absent | The default `--map` for `xq.py import`. It maps xq fields (`id` is required; `executor`, `status`, `brief`, `ts`, `event`, `verdict`, `by`, `commit`, `model` and `effort` are optional) to source keys. `status_values` maps source values to `done`, `failed`, `running`, `queued` or `closed`; `event_values` maps them to `assign`, `finish`, `verify`, `merge` or `close`. | [Adopting](adopting.md#import-the-old-ledger-as-read-only-history) |
+| `max_swap_gb` | finite number of 0 or more, in GiB (1024³ bytes); default: absent (no check) | `preflight` (and the hook's idle check) refuses when the swap space in use is above this value. macOS reads `used` from `sysctl -n vm.swapusage`; Linux reads `SwapTotal - SwapFree` from `/proc/meminfo`. Other platforms print `SKIP memory check`. | [Launch preflight](codex.md#memory-admission) |
+| `min_free_mem_gb` | finite number of 0 or more, in GiB; default: absent (no check) | `preflight` refuses when available memory is below this value. macOS: (free + inactive + speculative pages) × page size from `vm_stat`; Linux: `MemAvailable` from `/proc/meminfo`. A failed probe on macOS or Linux refuses. | [Launch preflight](codex.md#memory-admission) |
+| `idle_block_every` | duration such as `30m` or `1h` (`s`, `m`, `h`; a bare number is seconds); default: absent | The Stop hook blocks on idle executors at most once per interval; in between it prints the idle line and exits 0. Unverified, stale and `extra_checks` problems still block every time. The last idle block is stamped in `.agents/hook-idle.stamp` (private; `init` excludes it). | [Stop hook](../assets/README.md#stop-hook-options) |
+| `extra_checks` | list of command strings; default: absent | The Stop hook runs each command from the primary checkout (no shell, split like a POSIX shell line) and turns each non-empty stdout line (up to 20, 200 characters each) into a problem that blocks. A command that exits nonzero, is missing or times out prints `WARN extra check ...` and adds nothing. | [Stop hook](../assets/README.md#stop-hook-options) |
+| `extra_checks_timeout` | duration; default `20s` | Time limit for each `extra_checks` command. Keep the total below your Stop hook's own timeout. | [Stop hook](../assets/README.md#stop-hook-options) |
+
+`extra_checks` commands come from the config file, which you can track in Git: anyone who can change that file can
+run commands in every session that runs the Stop hook. Review config changes like code, and keep commands read-only.
 
 ### `brief_lint`
 

@@ -205,23 +205,35 @@ def context_file_path(root, value):
     return root / value
 
 
-def compose_prompt(root, brief_text, brief_name, context_files):
-    """The launch prompt: each context file between delimiters naming its path and sha256 prefix, then the brief."""
-    blocks = []
-    for value in context_files:
+def compose_prompt(root, brief_text, brief_name, context_files, extra_context=()):
+    """The launch prompt: each context file between delimiters naming its path and sha256 prefix, then the brief.
+    extra_context (compose --context) follows the configured context_files; a file already included is skipped."""
+    blocks, included = [], set()
+    sources = [(value, 'configured in .agents/config.json context_files') for value in context_files]
+    sources += [(value, '--context') for value in extra_context]
+    for value, origin in sources:
         path = context_file_path(root, value)
-        try:
-            with paths.safe_open(path, os.O_RDONLY, 'rb') as stream:
-                raw = stream.read(BRIEF_MAX_BYTES + 1)
-        except FileNotFoundError:
-            fail('context file not found: {} (configured in .agents/config.json context_files)'.format(value))
-        except OSError as exc:
-            fail('cannot read context file {}: {}'.format(value, exc))
-        if len(raw) > BRIEF_MAX_BYTES:
-            fail('context file is larger than {} bytes: {}'.format(BRIEF_MAX_BYTES, value))
-        blocks.append(delimited('context', value, raw.decode('utf-8-sig', errors='replace')))
+        key = os.path.normcase(os.path.normpath(value))
+        if key in included:
+            continue
+        included.add(key)
+        blocks.append(delimited('context', value, read_context_file(path, value, origin)))
     blocks.append(delimited('brief', brief_name, brief_text))
     return '\n'.join(blocks)
+
+
+def read_context_file(path, value, origin):
+    """One context file's text: a regular, non-symlinked file of at most BRIEF_MAX_BYTES."""
+    try:
+        with paths.safe_open(path, os.O_RDONLY, 'rb') as stream:
+            raw = stream.read(BRIEF_MAX_BYTES + 1)
+    except FileNotFoundError:
+        fail('context file not found: {} ({})'.format(value, origin))
+    except OSError as exc:
+        fail('cannot read context file {}: {}'.format(value, exc))
+    if len(raw) > BRIEF_MAX_BYTES:
+        fail('context file is larger than {} bytes: {}'.format(BRIEF_MAX_BYTES, value))
+    return raw.decode('utf-8-sig', errors='replace')
 
 
 def compose_out_refusal(root, out):

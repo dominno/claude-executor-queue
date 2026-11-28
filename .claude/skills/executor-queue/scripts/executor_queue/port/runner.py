@@ -6,8 +6,10 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 
 from ..core import util
+from ..core.capacity import parse_meminfo, parse_swapusage, parse_vm_stat
 from ..core.util import display_name, fail, LOCAL_EXECUTOR_LIMITS, short_reason
 from .adapter import ADAPTERS
 
@@ -165,3 +167,24 @@ def live_process_counts(samples=None):
                 if counts[executor] > before[executor] and len(samples.setdefault(executor, [])) < 5:
                     samples[executor].append(process_sample(pid, command))
     return counts
+
+
+def memory_readings():
+    """{'swap_used_gb', 'available_gb'} in GiB for the memory admission keys; None on an unsupported platform.
+
+    macOS: `sysctl -n vm.swapusage` (used swap) and `vm_stat` ((free + inactive + speculative) pages x page size);
+    Linux: /proc/meminfo (MemAvailable, SwapTotal - SwapFree). A failed probe raises OSError or ValueError.
+    """
+    if sys.platform == 'darwin':
+        readings = []
+        for argv in (['sysctl', '-n', 'vm.swapusage'], ['vm_stat']):
+            result = run(argv, env=dict(os.environ, LC_ALL='C'))
+            if result.returncode:
+                raise OSError('{} failed: {}'.format(argv[0], short_reason(result.stderr) or 'exit {}'.format(
+                    result.returncode)))
+            readings.append(result.stdout)
+        return dict(swap_used_gb=parse_swapusage(readings[0]), available_gb=parse_vm_stat(readings[1]))
+    if sys.platform.startswith('linux'):
+        with open('/proc/meminfo', encoding='ascii', errors='replace') as stream:
+            return parse_meminfo(stream.read())
+    return None

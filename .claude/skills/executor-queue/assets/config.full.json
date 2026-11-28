@@ -34,6 +34,20 @@
       "error": "failed",
       "active": "running",
       "archived": "closed"
+    },
+    "event": "kind",
+    "verdict": "verdict",
+    "by": "reader",
+    "commit": "merge_sha",
+    "model": "model",
+    "effort": "effort",
+    "event_values": {
+      "started": "assign",
+      "ended": "finish",
+      "checked": "verify",
+      "landed": "merge",
+      "retired": "close"
     }
-  }
+  },
+  "extra_checks_timeout": "20s"
 }

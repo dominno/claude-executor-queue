@@ -4,13 +4,13 @@ CORE names what it needs here; the outer layer installs the modules that provide
 CORE looks each name up on them at call time (seams.git(...)), so a test stub patched onto the providing module
 is the one CORE calls too. CORE itself starts no process and names no executor.
 
-  runner    run, git, live_process_counts                 (port.runner: the process runner)
+  runner    run, git, live_process_counts, memory_readings (port.runner: the process runner)
   registry  adapter_for, heartbeat_fields, ADAPTERS       (port.adapter: the executor adapter registry)
   adapters  private_paths                                 (the adapters package: paths the adapters keep private)
 """
 
 PROVIDED = {
-    'runner': ('run', 'git', 'live_process_counts'),
+    'runner': ('run', 'git', 'live_process_counts', 'memory_readings'),
     'registry': ('adapter_for', 'heartbeat_fields', 'ADAPTERS'),
     'adapters': ('private_paths',),
 }

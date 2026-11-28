@@ -142,6 +142,36 @@ def status_details(task):
     return details
 
 
+def zoned_timestamp(value):
+    """A recorded timestamp as given when it parses as a zoned ISO timestamp, else None."""
+    try:
+        parse_timestamp(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return value
+
+
+# status --json lifecycle fields: (record key, task key), timestamps from the recording event's ts.
+LIFECYCLE_TIMES = (('assigned_at', 'assigned'), ('finished_at', 'finished'), ('verified_at', 'verified_at'),
+                   ('merged_at', 'merged_at'))
+
+
+def lifecycle_fields(task):
+    """When the attempt was assigned, finished, verified and merged, who verified it and the merge commit (None when
+    not recorded); a verify that does not count (no verdict) reports no verifier."""
+    record = {key: zoned_timestamp(task.get(source)) for key, source in LIFECYCLE_TIMES}
+    by = task.get('by')
+    record['verified_by'] = by if task.get('verdict') and isinstance(by, str) and 0 < len(by) <= 200 and \
+        by.isprintable() else None
+    if not task.get('verdict'):
+        record['verified_at'] = None
+    merged = task.get('merged')
+    record['merge_commit'] = merged if isinstance(merged, str) and SHA_RE.fullmatch(merged) else None
+    if record['merge_commit'] is None:
+        record['merged_at'] = None
+    return record
+
+
 def status_record(task, stale_hours, details=False):
     # Allowlist metadata so summaries, paths, commands and evidence stay in the ledger.
     tid, executor, status = task['id'], task.get('executor'), task.get('status')
@@ -158,6 +188,7 @@ def status_record(task, stale_hours, details=False):
         'occupies_slot': occupies_slot(task),
         'observation': status_observation(task),
     }
+    record.update(lifecycle_fields(task))
     if task.get('imported'):
         # Additive: history imported by xq.py import (never an executor slot, never verified).
         record['imported'] = True

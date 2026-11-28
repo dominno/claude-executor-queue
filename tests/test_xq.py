@@ -173,10 +173,13 @@ def test_status_json_combines_filters_and_allowlists_observations(q, monkeypatch
     monkeypatch.setattr(q.xq.module_of('run'), 'run', local_only)
 
     assert q.cli('status', '--id', 'running-codex', '--executor', 'codex', '--state', 'running', '--json') == 0
-    assert json.loads(capsys.readouterr().out) == {'schema_version': 1, 'tasks': [{
+    data = json.loads(capsys.readouterr().out)
+    assert data['tasks'][0].pop('assigned_at').endswith('Z')
+    assert data == {'schema_version': 1, 'tasks': [{
         'id': 'running-codex', 'executor': 'codex', 'attempt': 1, 'state': 'running',
         'verdict': None, 'merged': False, 'closed': True, 'stale': False, 'occupies_slot': True,
         'observation': {'source': 'codex', 'state': 'running', 'observed_at': stamp},
+        'finished_at': None, 'verified_at': None, 'verified_by': None, 'merged_at': None, 'merge_commit': None,
         # status --id adds the recorded launch metadata; filtered listings keep the allowlist.
         'worktree': '/private/worktree', 'job': 'provider-job',
     }]}
@@ -3279,10 +3282,10 @@ def test_queued_codex_finish_done_refused(q):
 
 
 @pytest.mark.parametrize('comm,command,expected', [
-    ('/Users/dominik/.', '/Users/dominik/.local/bin/agy --prompt review', 'agy'),
-    ('/Users/dominik/.', '/Users/dominik/.nvm/versions/node/v22/lib/node_modules/@openai/codex/vendor/'
+    ('/Users/someone/.', '/Users/someone/.local/bin/agy --prompt review', 'agy'),
+    ('/Users/someone/.', '/Users/someone/.nvm/versions/node/v22/lib/node_modules/@openai/codex/vendor/'
                          'aarch64-apple-darwin/codex/codex exec --json', 'codex'),
-    ('node', 'node /Users/dominik/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs '
+    ('node', 'node /Users/someone/.claude/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs '
              'task-worker --job job1', 'codex'),
     ('node', 'node /plugins/codex-companion.mjs task --background', 'codex'),
     ('node', 'node /usr/local/bin/codex exec brief', 'codex'),

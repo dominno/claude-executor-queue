@@ -5,10 +5,10 @@ import json
 import os
 
 from . import paths
-from .config import check_import_map, IMPORT_MAP_SHAPE, IMPORT_STATES
+from .config import check_import_map, IMPORT_EVENTS, IMPORT_MAP_SHAPE, IMPORT_STATES
 from .ledger import replay_events
 from .state import parse_timestamp
-from .util import display_name, fail, ID_RE, OPTION_RE
+from .util import display_name, fail, ID_RE, OPTION_RE, SHA_RE
 
 
 def import_mapping(text, data):
@@ -25,6 +25,19 @@ def import_mapping(text, data):
     return mapping
 
 
+def printable(value):
+    return len(value) <= 4096 and value.isprintable()
+
+
+# Optional copied fields: (map key, import event key, validity check); an invalid value is dropped.
+IMPORT_COPIED = (('executor', 'source_executor', OPTION_RE.fullmatch), ('brief', 'brief', printable),
+                 ('by', 'by', lambda v: len(v) <= 200 and v.isprintable()), ('model', 'model', OPTION_RE.fullmatch),
+                 ('effort', 'effort', OPTION_RE.fullmatch))
+# Optional checked fields: (map key, value map, allowed values); an invalid value makes the line malformed.
+IMPORT_CHECKED = (('status', 'status_values', IMPORT_STATES), ('event', 'event_values', IMPORT_EVENTS),
+                  ('verdict', None, ('pass', 'fixes', 'reject')))
+
+
 def import_event(row, mapping):
     """One parsed source row as an xq 'import' event (no provenance yet), or (None, reason) when malformed."""
     if not isinstance(row, dict):
@@ -33,18 +46,24 @@ def import_event(row, mapping):
     if not isinstance(tid, str) or not ID_RE.fullmatch(tid):
         return None, 'missing or invalid task id in "{}"'.format(mapping['id'])
     event = {'event': 'import', 'id': tid}
-    for field, key, valid in (('executor', 'source_executor', OPTION_RE.fullmatch),
-                              ('brief', 'brief', lambda v: len(v) <= 4096 and v.isprintable())):
+    for field, key, valid in IMPORT_COPIED:
         value = row.get(mapping.get(field))
         if isinstance(value, str) and value and valid(value):
             event[key] = value
-    if mapping.get('status') in row:
-        value = row[mapping['status']]
-        status = mapping.get('status_values', {}).get(value, value) if isinstance(value, str) else None
-        if status not in IMPORT_STATES:
-            return None, 'status {} is not {}; map it in "status_values"'.format(
-                display_name(str(value))[:80], '|'.join(IMPORT_STATES))
-        event['status'] = status
+    for field, values, allowed in IMPORT_CHECKED:
+        if mapping.get(field) not in row:
+            continue
+        value = row[mapping[field]]
+        mapped = mapping.get(values, {}).get(value, value) if isinstance(value, str) else None
+        if mapped not in allowed:
+            return None, '{} {} is not {}{}'.format(field, display_name(str(value))[:80], '|'.join(allowed),
+                                                    '; map it in "{}"'.format(values) if values else '')
+        event['import_event' if field == 'event' else field] = mapped
+    if mapping.get('commit') in row:
+        value = row[mapping['commit']]
+        if not isinstance(value, str) or not SHA_RE.fullmatch(value):
+            return None, 'commit in "{}" is not a 7-64 character hex SHA'.format(mapping['commit'])
+        event['commit'] = value
     if mapping.get('ts') in row:
         try:
             parse_timestamp(row[mapping['ts']])

@@ -9,13 +9,16 @@ import re
 from . import paths
 from .brief import BRIEF_LINT_DEFAULTS, BRIEF_LINT_MODES
 from .paths import DEFAULT_LEDGER, repo_relative, safe_path
-from .util import EXECUTORS, fail, LOCAL_EXECUTOR_LIMITS
+from .util import duration_seconds, EXECUTORS, fail, LOCAL_EXECUTOR_LIMITS
 
 
-IMPORT_FIELDS = ('id', 'executor', 'status', 'brief', 'ts')
+IMPORT_FIELDS = ('id', 'executor', 'status', 'brief', 'ts', 'event', 'verdict', 'by', 'commit', 'model', 'effort')
 IMPORT_STATES = ('done', 'failed', 'running', 'queued', 'closed')
-IMPORT_MAP_SHAPE = ('{"id": "<source key>"} plus optional executor/status/brief/ts source keys and '
-                    '"status_values": {"<source value>": "done|failed|running|queued|closed"}')
+IMPORT_EVENTS = ('assign', 'finish', 'verify', 'merge', 'close')
+IMPORT_VALUE_MAPS = {'status_values': IMPORT_STATES, 'event_values': IMPORT_EVENTS}
+IMPORT_MAP_SHAPE = ('{"id": "<source key>"} plus optional executor/status/brief/ts/event/verdict/by/commit/model/'
+                    'effort source keys, "status_values": {"<source value>": "done|failed|running|queued|closed"} '
+                    'and "event_values": {"<source value>": "assign|finish|verify|merge|close"}')
 
 
 def check_import_map(value):
@@ -23,8 +26,8 @@ def check_import_map(value):
     if not isinstance(value, dict) or not isinstance(value.get('id'), str):
         raise ValueError()
     for key, source in value.items():
-        if key == 'status_values':
-            if not isinstance(source, dict) or any(v not in IMPORT_STATES for v in source.values()):
+        if key in IMPORT_VALUE_MAPS:
+            if not isinstance(source, dict) or any(v not in IMPORT_VALUE_MAPS[key] for v in source.values()):
                 raise ValueError()
         elif key not in IMPORT_FIELDS or not isinstance(source, str) or not source:
             raise ValueError()
@@ -63,6 +66,7 @@ def config(root):
             raise ValueError()
         check_brief_config(data)
         check_history_config(data)
+        check_admission_config(data)
         if any(key in data and data[key] not in modes for key, modes in CHECK_MODES.items()):
             raise ValueError()
         return data
@@ -76,7 +80,9 @@ def config(root):
              'context_files: list of repo-relative paths; brief_lint: {{}} with mode off|warn|enforce, restricted: '
              'strings, handoff_marker: string, fields: {{"Name": [allowed values]}}, result_max_words/max_steps: '
              'positive integers, notes_require_file: true|false); scope_check: off|warn|enforce; stale_base: '
-             'off|warn|refuse; ledger: repo-relative *.jsonl path; import_map: {})'.format(
+             'off|warn|refuse; ledger: repo-relative *.jsonl path; import_map: {}; max_swap_gb/min_free_mem_gb: '
+             'finite nonnegative GiB; idle_block_every: duration such as 30m or 1h; extra_checks: list of command '
+             'strings; extra_checks_timeout: duration)'.format(
                  '/'.join(LOCAL_EXECUTOR_LIMITS), IMPORT_MAP_SHAPE))
 
 
@@ -110,6 +116,21 @@ def check_history_config(data):
         raise ValueError()
     if 'import_map' in data:
         check_import_map(data['import_map'])
+
+
+def finite_nonnegative(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def check_admission_config(data):
+    """Raise ValueError for invalid memory admission or Stop hook keys (config() names the valid shapes)."""
+    if any(key in data and not finite_nonnegative(data[key]) for key in ('max_swap_gb', 'min_free_mem_gb')):
+        raise ValueError()
+    for key in ('idle_block_every', 'extra_checks_timeout'):
+        if key in data and not (isinstance(data[key], str) and duration_seconds(data[key])):
+            raise ValueError()
+    if 'extra_checks' in data and not nonempty_strings(data['extra_checks']):
+        raise ValueError()
 
 
 def brief_lint_settings(data, at_assign=False):

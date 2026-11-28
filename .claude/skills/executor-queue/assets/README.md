@@ -11,7 +11,8 @@ relative to the skill directory (`.claude/skills/executor-queue` or `.agents/ski
   must match `cloud-envelope --tasks`. Review all outgoing commits before each authorized push. A batch brief has
   no per-task Acceptance, so `brief-lint` and the declared-scope check do not apply to it.
 - `config.json`: copy or merge into the project's `.agents/config.json`; opt-in keep_busy for Codex.
-- `config.full.json`: every config key at its default (sample `main`, `context_files`, `import_map`);
+- `config.full.json`: every config key at its default (sample `main`, `context_files`, `import_map`; the checks
+  that are off unless set, `max_swap_gb`, `min_free_mem_gb`, `idle_block_every` and `extra_checks`, are left out);
   see [Configuration](../references/configuration.md). Copy only the keys you need.
 - `settings.json`: macOS/Linux Stop-hook snippet using `python3`.
 - `settings.windows.json`: Windows Stop-hook snippet for Claude Code with Git Bash using `py -3`.
@@ -34,6 +35,17 @@ the snippet with `exec python` or `exec python3`. Leave the command in Bash synt
 even when you use PowerShell to install the skill. Follow the
 [PowerShell commands](../references/installation.md#run-xq-directly) for direct calls.
 The agy bridge requires macOS or Linux.
+
+## Stop hook options
+
+- `idle_block_every` (for example `"1h"`) limits how often an idle executor makes the hook block. Unverified and
+  stale work still blocks every time.
+- `extra_checks` adds project checks: each command runs from the primary checkout without a shell (wrap it in
+  `sh -c '...'` for pipes), and each non-empty line it prints on stdout with exit 0 becomes a blocking problem.
+  A failing, missing or timed-out command (`extra_checks_timeout`, default `20s`) prints a WARN and never stops
+  the hook. The commands come from tracked config: review changes to it like code.
+
+See [Configuration](../references/configuration.md).
 
 If the backlog is empty, pause or review the configuration.
 Run init before doctor. Config is trackable policy; ledger/lock/review/config temp files stay local.

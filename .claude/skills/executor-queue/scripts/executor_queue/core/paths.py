@@ -9,6 +9,7 @@ from .util import fail
 
 
 DEFAULT_LEDGER = '.agents/ledger.jsonl'
+IDLE_STAMP = '.agents/hook-idle.stamp'  # when the Stop hook last blocked on idle work (config idle_block_every)
 
 
 def repo_relative(value):
@@ -29,7 +30,7 @@ def ledger_committed(data):
 
 # xq's own private state; PRIVATE_PATHS (after the registry) adds each adapter's private_state directories.
 XQ_PRIVATE_PATHS = ('/' + DEFAULT_LEDGER, '/' + DEFAULT_LEDGER[:-len('.jsonl')] + '.lock', '/.agents/review/',
-                    '/.agents/config.tmp', '/.agents/config.json.tmp')
+                    '/.agents/config.tmp', '/.agents/config.json.tmp', '/' + IDLE_STAMP)
 
 
 def safe_path(path):

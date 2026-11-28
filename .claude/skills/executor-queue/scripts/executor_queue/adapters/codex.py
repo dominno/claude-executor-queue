@@ -17,8 +17,8 @@ from ..port.adapter import ExecutorAdapter
 from ..port.discovery import plugin_project_root, shell_assignment
 from ..port.runner import worktree_git, WORKTREE_GIT_CONFIG
 from .codex_poll import codex_model_check, poll_codex
-from .codex_worktree import (codex_delivery, codex_scope_paths, removed_worktree_head, same_repository,
-                             untracked_leftovers, worktree_scan, worktree_sensitive)
+from .codex_worktree import (codex_delivery, codex_scope_paths, DEPENDENCY_DIRS, removed_worktree_head,
+                             same_repository, untracked_leftovers, worktree_scan, worktree_sensitive)
 
 
 # --- ADAPTERS: Codex ----------------------------------------------------------------------------------------------
@@ -26,14 +26,31 @@ from .codex_worktree import (codex_delivery, codex_scope_paths, removed_worktree
 CODEX_NON_TASK = ('--version', '--help', 'login', 'logout', 'status', 'completion', 'app-server')
 
 
+def primary_checkout_message(root, tid):
+    """Why Codex must not run in the primary checkout, with the command that creates a worktree instead."""
+    suggestion = shlex.quote(str(root.parent / '{}-{}'.format(root.name, tid))) if tid else '<worktree>'
+    return ('Codex must not run in the primary checkout {} (it could write the xq ledger and '
+            '.agy-bridge results); create one: git -C {} worktree add -b xq/{} {} HEAD'.format(
+                shlex.quote(str(root)), shlex.quote(str(root)), tid or '<id>', suggestion))
+
+
+def shared_dependency_warnings(worktree):
+    """WARN lines for top-level dependency trees that are symlinks (allowed: shared read-only environments)."""
+    warnings = []
+    for name in DEPENDENCY_DIRS:
+        path = Path(worktree) / name
+        if path.is_symlink():
+            warnings.append('shared dependency {} is a symlink to {}; keep its target outside the worktree and '
+                            'read-only, and ignore it without a trailing slash (references/codex.md)'.format(
+                                name, display_name(os.readlink(str(path)))[:200]))
+    return warnings
+
+
 def codex_worktree_checks(root, a, known, worktree):
     """Refuse the primary checkout and a worktree another Codex task is running in; True for a forced primary."""
     primary = same_worktree(worktree, str(root))
     if primary:
-        suggestion = str(root.parent / '{}-{}'.format(root.name, a.id))
-        message = ('Codex must not run in the primary checkout {} (it could write the xq ledger and '
-                   '.agy-bridge results); create one: git -C {} worktree add -b xq/{} {} HEAD'.format(
-                       shlex.quote(str(root)), shlex.quote(str(root)), a.id, shlex.quote(suggestion)))
+        message = primary_checkout_message(root, a.id)
         if not a.force:
             fail(message)
         print('WARN ' + message + ' (forced: its xq/agy-bridge state is reviewed as untrusted)', file=sys.stderr)
@@ -286,6 +303,12 @@ class CodexAdapter(ExecutorAdapter):
     @staticmethod
     def worktree_base(root, worktree):
         return assignment_base(root, worktree, {})
+
+    @staticmethod
+    def preflight_worktree(root, worktree):
+        if same_worktree(worktree, str(root)):
+            return [primary_checkout_message(root, None)], []
+        return [], shared_dependency_warnings(worktree)
 
     @staticmethod
     def check_merge_head(root, task, head):

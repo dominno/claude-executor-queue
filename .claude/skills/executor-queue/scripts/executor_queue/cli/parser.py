@@ -2,12 +2,11 @@
 
 import argparse
 import math
-import re
 
 from .. import VERSION
-from ..core.util import EXECUTORS, LOCAL_EXECUTOR_LIMITS, TASK_STATES
+from ..core.util import DURATION_RE, EXECUTORS, LOCAL_EXECUTOR_LIMITS, TASK_STATES
 from .commands.executors import cmd_agy_sync, cmd_cloud_collect, cmd_cloud_envelope, cmd_poll
-from .commands.read import cmd_hook, cmd_pause, cmd_status
+from .commands.read import cmd_events, cmd_hook, cmd_pause, cmd_status
 from .commands.record import cmd_ack, cmd_close, cmd_finish, cmd_merge, cmd_verify
 from .commands.setup import cmd_assign, cmd_brief_lint, cmd_compose, cmd_import, cmd_init, cmd_preflight, doctor
 
@@ -29,15 +28,13 @@ def acknowledgement_hours(value):
     return hours
 
 
-STATUS_FIELDS = ('review_base', 'base', 'head', 'verified_head', 'worktree', 'job')
+STATUS_FIELDS = ('state', 'review_base', 'base', 'head', 'verified_head', 'worktree', 'job')
 
 
 def parse_duration(value):
-    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)([smh]?)', value.strip())
-    if not match:
-        raise argparse.ArgumentTypeError('use a duration such as 30s, 10m or 1h')
-    seconds = float(match.group(1)) * {'': 1, 's': 1, 'm': 60, 'h': 3600}[match.group(2)]
-    if not math.isfinite(seconds):
+    match = DURATION_RE.fullmatch(value.strip())
+    seconds = float(match.group(1)) * {'': 1, 's': 1, 'm': 60, 'h': 3600}[match.group(2)] if match else None
+    if seconds is None or not math.isfinite(seconds):
         raise argparse.ArgumentTypeError('use a duration such as 30s, 10m or 1h')
     return seconds
 
@@ -112,6 +109,9 @@ def add_setup_commands(command, task_id):
     s.add_argument('--brief', required=True, help='brief path, relative to the primary checkout or absolute')
     s.add_argument('--out', help='output path (default .agents/review/<brief stem>.prompt.md); never xq state or '
                    'config, and an existing file only when it is a *.prompt.md')
+    s.add_argument('--context', action='append', metavar='FILE',
+                   help='repo-relative file for this task only, added after the configured context_files '
+                        '(repeatable; same rules: no absolute path, "..", symlink or missing file)')
 
 
 def add_record_commands(command, task_id, force):
@@ -157,15 +157,18 @@ def add_read_commands(command):
     s.description = ('Read this repository’s ledger. Provider observations are recorded evidence. '
                      'Text columns show ID, executor, state, verdict, reader, merge commit and flags.')
     s.add_argument('--id', help='show one exact task ID with its recorded worktree, base, review_base, job, head, '
-                                'verified_head and brief')
+                                'verified_head and brief (exit 1 for an unknown id)')
     s.add_argument('--executor', choices=EXECUTORS, help='show tasks for this executor')
     s.add_argument('--state', choices=TASK_STATES, help='filter the recorded ledger state')
     s.add_argument('--open', action='store_true', help='show tasks that still need attention')
     s.add_argument('--stale-hours', type=positive_hours, default=4, help='mark running tasks stale after this many hours')
     s.add_argument('--json', action='store_true', help='emit versioned JSON with task metadata')
     s.add_argument('--field', choices=STATUS_FIELDS,
-                   help='with --id: print one recorded value bare, for shell use (review_base falls back to base, '
-                        'the start of the reviewed range)')
+                   help='with --id: print one recorded value bare, for shell use (state is the recorded ledger '
+                        'state; review_base falls back to base, the start of the reviewed range)')
+    s = command('events', 'print the recorded ledger events, batch envelopes expanded', cmd_events)
+    s.add_argument('--id', help='only the events of this exact task id')
+    s.add_argument('--json', action='store_true', help='emit versioned JSON {"schema_version": 1, "events": [...]}')
     s = command('hook', 'Stop hook: flag unverified, stale or idle work (exit 2)', cmd_hook)
     s.add_argument('--stale-hours', type=positive_hours, default=4, help='flag running tasks older than this')
     s = command('pause', 'pause idle/stale enforcement for an executor', cmd_pause)
