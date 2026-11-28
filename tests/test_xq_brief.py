@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -301,3 +302,55 @@ def test_wildcard_files_and_brace_globs(b):
     assert errors and 'matches every file' in errors[0]
     brief = b.xq.BriefModel('Result: x\n## Acceptance\nFiles: src/{a,b}.py, docs/*.md\nChecks: c\nNotes: n\n')
     assert brief.files() == ['src/{a,b}.py', 'docs/*.md']
+
+
+TWO_RESULTS = GOOD.replace('Domain: backend', 'Result: The parser also logs every call.')
+RESTRICTED = GOOD.replace('2. Handle the empty string.', '2. Handle the empty string without network.')
+
+
+def test_shape_mode_enforce_refuses_shape_errors_while_mode_warn_only_warns(b, capsys):
+    b.configure(brief_lint={'mode': 'warn', 'shape_mode': 'enforce', 'restricted': ['network']})
+    assert assign(b, b.brief(RESTRICTED), '--queued') == 0
+    err = capsys.readouterr().err
+    assert 'brief-lint: WARN brief restricted "network"' in err
+    with pytest.raises(SystemExit, match=r'brief-lint refused .* \(1 shape error\(s\); brief_lint shape_mode is '
+                                         r'enforce\): split the brief'):
+        b.cli('assign', '--id', 't2', '--executor', 'agy', '--brief', b.brief(TWO_RESULTS, 't2'), '--queued')
+    assert 'brief-lint: ERROR expected exactly one "Result:" line, found 2' in capsys.readouterr().err
+    assert b.cli('assign', '--id', 't2', '--executor', 'agy', '--brief', b.brief(TWO_RESULTS, 't2'), '--force') == 0
+
+
+def test_shape_mode_warn_or_off_with_mode_enforce_refuses_only_other_rules(b, capsys):
+    b.configure(brief_lint={'mode': 'enforce', 'shape_mode': 'warn', 'restricted': ['network']})
+    assert assign(b, b.brief(TWO_RESULTS), '--queued') == 0
+    assert 'brief-lint: WARN brief expected exactly one "Result:" line, found 2' in capsys.readouterr().err
+    with pytest.raises(SystemExit, match=r'brief-lint refused .*brief_lint mode is enforce'):
+        b.cli('assign', '--id', 't2', '--executor', 'agy', '--brief', b.brief(RESTRICTED, 't2'), '--queued')
+    capsys.readouterr()
+    b.configure(brief_lint={'mode': 'warn', 'shape_mode': 'off'})
+    assert b.cli('assign', '--id', 't3', '--executor', 'agy', '--brief', b.brief(TWO_RESULTS, 't3')) == 0
+    assert 'Result' not in capsys.readouterr().err
+
+
+def test_shape_mode_defaults_to_mode_and_rejects_bad_values(b, capsys):
+    b.configure(brief_lint={'mode': 'enforce'})
+    with pytest.raises(SystemExit, match='shape error'):
+        assign(b, b.brief(TWO_RESULTS), '--queued')
+    b.configure(brief_lint={'shape_mode': 'strict'})
+    with pytest.raises(SystemExit, match=re.escape('shape_mode off|warn|enforce (default: mode)')):
+        b.cli('brief-lint', '--brief', b.brief(GOOD))
+
+
+def test_brief_lint_command_names_the_split_under_shape_enforce(b, capsys):
+    b.configure(brief_lint={'mode': 'warn', 'shape_mode': 'enforce'})
+    assert b.cli('brief-lint', '--brief', b.brief(TWO_RESULTS)) == 1
+    out = capsys.readouterr().out
+    assert 'ERROR expected exactly one "Result:" line, found 2' in out
+    assert 'shape_mode is enforce: split the brief into one brief per Result' in out
+    assert 'brief-lint failed: 1 error(s)' in out
+    assert b.cli('brief-lint', '--brief', b.brief(TWO_RESULTS), '--json') == 1
+    data = json.loads(capsys.readouterr().out)
+    assert data['ok'] is False and data['shape_errors'] == [
+        'expected exactly one "Result:" line, found 2 (lines 2, 3)']
+    assert b.cli('brief-lint', '--brief', b.brief(GOOD)) == 0
+    assert 'split' not in capsys.readouterr().out

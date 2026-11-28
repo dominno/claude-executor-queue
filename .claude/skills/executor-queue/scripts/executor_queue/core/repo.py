@@ -181,18 +181,33 @@ def merged_extra_commits(root, sha, head):
     return extra
 
 
-def history_paths(root, base, head, *pathspec):
-    # Separate merge-parent diffs and both sides of renames expose paths that
-    # changed in any outgoing commit, even when the tip restores the old tree.
-    output = seams.git('log', '--format=', '--raw', '--no-renames', '-m', '--full-history', '-z',
-                 base + '..' + head, '--', *pathspec, cwd=root).split('\0')
-    # special maps symlinks and gitlinks (submodule pointers) to their WARN reason.
+def history_paths(root, base, head, *pathspec, trusted=None):
+    """(paths changed by any commit in base..head, special) where special maps symlinks and gitlinks (submodule
+    pointers) to their WARN reason.
+
+    Separate merge-parent diffs and both sides of renames expose paths that changed in any outgoing commit, even
+    when the tip restores the old tree. With trusted (the default branch), a merge that has parents on it is
+    diffed only against those parents: what it brings beyond trusted history, not trusted history itself."""
+    log = ['log', '--format=', '--raw', '--no-renames', '--full-history', '-z']
+    outputs = []
+    if trusted:
+        outputs.append(seams.git(*log, '--no-merges', base + '..' + head, '--', *pathspec, cwd=root))
+        for merge in seams.git('rev-list', '--merges', base + '..' + head, cwd=root).split():
+            parents = commit_parents(root, merge)
+            on_trusted = [parent for parent in parents if ancestor(parent, trusted, root)]
+            for parent in on_trusted or parents:
+                outputs.append(seams.git('diff', '--raw', '--no-renames', '-z', parent, merge, '--', *pathspec,
+                                         cwd=root))
+    else:
+        outputs.append(seams.git(*log, '-m', base + '..' + head, '--', *pathspec, cwd=root))
     paths, special = set(), {}
-    for metadata, path in zip(output[::2], output[1::2]):
-        old_mode, new_mode, *_ = metadata.lstrip('\n:').split()
-        paths.add(path)
-        if '160000' in (old_mode, new_mode):
-            special[path] = 'submodule pointer'
-        elif '120000' in (old_mode, new_mode):
-            special.setdefault(path, 'symlink')
+    for text in outputs:
+        output = text.split('\0')
+        for metadata, path in zip(output[::2], output[1::2]):
+            old_mode, new_mode, *_ = metadata.lstrip('\n:').split()
+            paths.add(path)
+            if '160000' in (old_mode, new_mode):
+                special[path] = 'submodule pointer'
+            elif '120000' in (old_mode, new_mode):
+                special.setdefault(path, 'symlink')
     return paths, special

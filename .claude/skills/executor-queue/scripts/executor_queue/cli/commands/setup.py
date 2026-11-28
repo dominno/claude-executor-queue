@@ -9,12 +9,13 @@ import sys
 
 from ...adapters import private_paths
 from ...core import ledger, paths
-from ...core.brief import compose_out_refusal, compose_prompt, file_sha256, lint_brief, read_brief_text
+from ...core.brief import (compose_out_refusal, compose_prompt, file_sha256, lint_brief_shape, lint_modes,
+                           read_brief_text, SHAPE_SPLIT)
 from ...core.capacity import preflight_status
 from ...core.config import brief_lint_settings, config
 from ...core.importer import import_mapping, import_plan, jsonl_lines
 from ...core.ledger import append, append_many, exclude_private, ledger_mutation, ledger_path
-from ...core.paths import DEFAULT_LEDGER, ledger_committed, ledger_relative, safe_path
+from ...core.paths import DEFAULT_LEDGER, ledger_committed, ledger_relative, PRIVATE_PATHS_SINCE, safe_path
 from ...core.repo import brief_relative, checked_worktree, default_branch, origin_default
 from ...core.review import inherited_review_base, stale_base_check, stale_base_finding
 from ...core.state import check_id_collision, JOB_RE, valid_id
@@ -141,16 +142,25 @@ def print_lint(errors, warnings, stream=None, prefix=''):
 
 
 def assign_lint(root, brief, force):
-    """brief_lint at assign: off is silent, warn prints to stderr, enforce refuses errors unless --force."""
+    """brief_lint at assign, per rule group: shape_mode governs the shape rules, mode the rest. off is silent, warn
+    prints to stderr, enforce refuses that group's errors unless --force."""
     settings = brief_lint_settings(config(root), at_assign=True)
-    if settings['mode'] == 'off':
+    mode, shape_mode = lint_modes(settings)
+    if mode == shape_mode == 'off':
         return
-    errors, warnings = lint_brief(read_brief_text(brief), settings)
-    if settings['mode'] == 'enforce' and errors and not force:
-        print_lint(errors, warnings, sys.stderr, 'brief-lint: ')
-        fail('brief-lint refused {} ({} error(s); brief_lint mode is enforce): fix the brief, or pass --force to '
-             'bypass (recorded as force in the ledger)'.format(brief, len(errors)))
-    print_lint([], ['brief ' + e for e in errors] + warnings, sys.stderr, 'brief-lint: ')
+    errors, warnings, shape = lint_brief_shape(read_brief_text(brief), settings)
+    groups = (('shape_mode', shape_mode, shape), ('mode', mode, [e for e in errors if e not in shape]))
+    shown = [e for _, value, found in groups if value != 'off' for e in found]
+    warnings = warnings if mode != 'off' else []
+    refused = [(key, found) for key, value, found in groups if value == 'enforce' and found]
+    if refused and not force:
+        print_lint(shown, warnings, sys.stderr, 'brief-lint: ')
+        counts = ', '.join('{} {}error(s)'.format(len(found), 'shape ' if key == 'shape_mode' else '')
+                           for key, found in refused)
+        fix = '; '.join(SHAPE_SPLIT if key == 'shape_mode' else 'fix the brief' for key, _ in refused)
+        fail('brief-lint refused {} ({}; brief_lint {} is enforce): {}, or pass --force to bypass (recorded as force '
+             'in the ledger)'.format(brief, counts, ' and '.join(key for key, _ in refused), fix))
+    print_lint([], ['brief ' + e for e in shown] + warnings, sys.stderr, 'brief-lint: ')
 
 
 def assign_brief(a, root):
@@ -232,12 +242,16 @@ def cmd_brief_lint(a):
     root = ledger.repo_root()
     brief = brief_argument(root, a.brief)
     settings = brief_lint_settings(config(root))
-    errors, warnings = lint_brief(read_brief_text(brief), settings)
+    errors, warnings, shape = lint_brief_shape(read_brief_text(brief), settings)
     failed = bool(errors or (a.enforce and warnings))
     if a.json:
-        print(json.dumps(dict(version=1, brief=str(brief), ok=not failed, errors=errors, warnings=warnings)))
+        print(json.dumps(dict(version=1, brief=str(brief), ok=not failed, errors=errors, warnings=warnings,
+                              shape_errors=shape)))
     else:
         print_lint(errors, warnings)
+        if shape and lint_modes(settings)[1] == 'enforce':
+            print('brief_lint shape_mode is enforce: {} ({} shape error(s); assign refuses it)'.format(
+                SHAPE_SPLIT, len(shape)))
         print('brief-lint {}: {} error(s), {} warning(s){}'.format(
             'failed' if failed else 'OK', len(errors), len(warnings), ' (--enforce: warnings fail)' if a.enforce else ''))
     return 1 if failed else 0
@@ -313,8 +327,10 @@ def doctor_repository(root, check):
         probe = path.lstrip('/') + ('probe' if path.endswith('/') else '')
         ignored = runner.run(['git', 'check-ignore', '-q', probe], cwd=root).returncode == 0
         tracked = runner.git('ls-files', '--', path.strip('/'), cwd=root).strip()
-        check(path, ignored and not tracked,
-              'ignored and untracked' if ignored and not tracked else ('tracked' if tracked else 'not ignored'),
+        since = PRIVATE_PATHS_SINCE.get(path)
+        missing = 'tracked' if tracked else 'not ignored' + (
+            ' (new in {}; run xq init after updating)'.format(since) if since else '')
+        check(path, ignored and not tracked, 'ignored and untracked' if ignored and not tracked else missing,
               'run xq init; remove tracked private state from the index')
 
 

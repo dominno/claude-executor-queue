@@ -77,12 +77,12 @@ def config(root):
     except (ValueError, OverflowError, RecursionError):
         fail('invalid .agents/config.json (keep_busy/paused: executor lists; limits: {} nonnegative integers; '
              'min_free_gb: finite nonnegative number; max_load_per_cpu: finite positive number; main: branch string; '
-             'context_files: list of repo-relative paths; brief_lint: {{}} with mode off|warn|enforce, restricted: '
-             'strings, handoff_marker: string, fields: {{"Name": [allowed values]}}, result_max_words/max_steps: '
-             'positive integers, notes_require_file: true|false); scope_check: off|warn|enforce; stale_base: '
-             'off|warn|refuse; ledger: repo-relative *.jsonl path; import_map: {}; max_swap_gb/min_free_mem_gb: '
-             'finite nonnegative GiB; idle_block_every: duration such as 30m or 1h; extra_checks: list of command '
-             'strings; extra_checks_timeout: duration)'.format(
+             'context_files: list of repo-relative paths; brief_lint: {{}} with mode off|warn|enforce, shape_mode '
+             'off|warn|enforce (default: mode), restricted: strings, handoff_marker: string, fields: {{"Name": '
+             '[allowed values]}}, result_max_words/max_steps: positive integers, notes_require_file: true|false); '
+             'scope_check: off|warn|enforce; stale_base: off|warn|refuse; ledger: repo-relative *.jsonl path; '
+             'import_map: {}; max_swap_gb/min_free_mem_gb: finite nonnegative GiB; idle_block_every: duration '
+             'such as 30m or 1h; extra_checks: list of command strings; extra_checks_timeout: duration)'.format(
                  '/'.join(LOCAL_EXECUTOR_LIMITS), IMPORT_MAP_SHAPE))
 
 
@@ -98,7 +98,7 @@ def check_brief_config(data):
     if not isinstance(lint, dict) or set(lint) - set(BRIEF_LINT_DEFAULTS):
         raise ValueError()
     fields = lint.get('fields', {})
-    valid = (lint.get('mode', 'warn') in BRIEF_LINT_MODES and
+    valid = (lint.get('mode', 'warn') in BRIEF_LINT_MODES and lint.get('shape_mode', 'warn') in BRIEF_LINT_MODES and
              nonempty_strings(lint.get('restricted', [])) and
              isinstance(lint.get('handoff_marker', 'x'), str) and lint.get('handoff_marker', 'x').strip() and
              isinstance(fields, dict) and all(nonempty_strings(v) and v for v in fields.values()) and

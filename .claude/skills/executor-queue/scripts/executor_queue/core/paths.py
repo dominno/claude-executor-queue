@@ -31,6 +31,9 @@ def ledger_committed(data):
 # xq's own private state; PRIVATE_PATHS (after the registry) adds each adapter's private_state directories.
 XQ_PRIVATE_PATHS = ('/' + DEFAULT_LEDGER, '/' + DEFAULT_LEDGER[:-len('.jsonl')] + '.lock', '/.agents/review/',
                     '/.agents/config.tmp', '/.agents/config.json.tmp', '/' + IDLE_STAMP)
+# Private paths added after the first release -> the version that added them: an older init did not exclude them,
+# so doctor tells an updated project to re-run init.
+PRIVATE_PATHS_SINCE = {'/' + IDLE_STAMP: '3.7.0'}
 
 
 def safe_path(path):

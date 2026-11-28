@@ -11,8 +11,10 @@ from .util import display_name, fail
 
 
 BRIEF_LINT_MODES = ('off', 'warn', 'enforce')
-BRIEF_LINT_DEFAULTS = dict(mode='warn', restricted=[], handoff_marker='lead runs', fields={}, result_max_words=45,
-                           max_steps=4, notes_require_file=False)
+BRIEF_LINT_DEFAULTS = dict(mode='warn', shape_mode=None, restricted=[], handoff_marker='lead runs', fields={},
+                           result_max_words=45, max_steps=4, notes_require_file=False)
+SHAPE_SPLIT = ('split the brief into one brief per Result: line, each with exactly one "Result:" line and a final '
+               '"## Acceptance" with Files:, Checks: and Notes:')
 ACCEPTANCE_LABELS = ('Files', 'Checks', 'Notes')
 ACCEPTANCE_KEYS = {label.casefold(): label for label in ACCEPTANCE_LABELS}
 BRIEF_MAX_BYTES = 1 << 20
@@ -119,12 +121,14 @@ def placeholder(value):
     return bool(PLACEHOLDER_RE.fullmatch(value.strip()))
 
 
-def lint_result(brief, settings):
+def lint_result(brief, settings, shape):
+    """(errors, warnings) of the Result rules; the exactly-one-Result error is also appended to shape."""
     errors, warnings = [], []
     if len(brief.results) != 1:
-        errors.append('expected exactly one "Result:" line, found {}{}'.format(
+        shape.append('expected exactly one "Result:" line, found {}{}'.format(
             len(brief.results), ' (lines {})'.format(', '.join(str(n) for n, _ in brief.results))
             if brief.results else ''))
+        errors.append(shape[-1])
     for number, value in brief.results[:1]:
         if placeholder(value):
             errors.append('line {}: Result is a placeholder; state the one observable outcome'.format(number))
@@ -140,7 +144,8 @@ def lint_result(brief, settings):
     return errors, warnings
 
 
-def lint_acceptance(brief, settings):
+def acceptance_shape(brief):
+    """Shape errors of the final ## Acceptance: exactly one, last, with nonempty Files:, Checks: and Notes:."""
     if not brief.acceptance:
         return ['missing final "## Acceptance" section with Files:, Checks: and Notes:']
     errors = []
@@ -154,6 +159,15 @@ def lint_acceptance(brief, settings):
             errors.append('Acceptance has no "{}:" line'.format(label))
         elif all(placeholder(x) and not WILDCARD_ALL_RE.fullmatch(x) for x in brief.section_items(label)):
             errors.append('line {}: Acceptance {}: is empty or a placeholder'.format(brief.sections[label][0], label))
+    return errors
+
+
+def lint_acceptance(brief, settings, shape):
+    """Acceptance errors; the shape ones (acceptance_shape) are also appended to shape."""
+    errors = acceptance_shape(brief)
+    shape += errors
+    if not brief.acceptance:
+        return errors
     for path in brief.files():
         if WILDCARD_ALL_RE.fullmatch(path):
             errors.append('Acceptance Files: "{}" matches every file; name the paths or a narrower glob'.format(path))
@@ -192,10 +206,22 @@ def lint_fields(brief, settings):
 
 def lint_brief(text, settings):
     """(errors, warnings) for a brief text under brief_lint settings (see brief_lint_settings)."""
-    brief = BriefModel(text)
-    errors, warnings = lint_result(brief, settings)
-    errors += lint_acceptance(brief, settings) + lint_restricted(brief, settings) + lint_fields(brief, settings)
+    errors, warnings, _ = lint_brief_shape(text, settings)
     return errors, warnings
+
+
+def lint_brief_shape(text, settings):
+    """(errors, warnings, shape): shape lists the errors of the shape rules (exactly one Result: line; one final
+    ## Acceptance with Files:, Checks: and Notes:), which brief_lint shape_mode governs; mode governs the rest."""
+    brief, shape = BriefModel(text), []
+    errors, warnings = lint_result(brief, settings, shape)
+    errors += lint_acceptance(brief, settings, shape) + lint_restricted(brief, settings) + lint_fields(brief, settings)
+    return errors, warnings, shape
+
+
+def lint_modes(settings):
+    """(mode, shape_mode) of brief_lint settings; shape_mode defaults to mode."""
+    return settings['mode'], settings.get('shape_mode') or settings['mode']
 
 
 def context_file_path(root, value):

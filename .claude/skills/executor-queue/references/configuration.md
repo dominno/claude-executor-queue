@@ -41,12 +41,16 @@ run commands in every session that runs the Stop hook. Review config changes lik
 ### `brief_lint`
 
 ```json
-{"brief_lint": {"mode": "warn", "restricted": [], "handoff_marker": "lead runs", "fields": {},
+{"brief_lint": {"mode": "warn", "shape_mode": "warn", "restricted": [], "handoff_marker": "lead runs", "fields": {},
                 "result_max_words": 45, "max_steps": 4, "notes_require_file": false}}
 ```
 
 - `mode`: `off`, `warn` or `enforce`. With `warn`, `assign` prints the findings to stderr. With `enforce`,
-  `assign` refuses a brief that has errors unless you pass `--force`.
+  `assign` refuses a brief that has errors unless you pass `--force`. It governs every rule except the shape rules.
+- `shape_mode`: `off`, `warn` or `enforce`; default: the value of `mode`. It governs only the shape rules: exactly
+  one `Result:` line and one final `## Acceptance` with `Files:`, `Checks:` and `Notes:`. `{"mode": "warn",
+  "shape_mode": "enforce"}` refuses a multi-result brief at `assign` while the other rules only warn, and
+  `brief-lint` then prints a line telling you to split the brief and exits 1.
 - `restricted`: words or phrases, such as `"network"` or `"git commit"`. A line that names one must also
   contain `handoff_marker`.
 - `handoff_marker`: the text that marks a step the lead (not the executor) runs. The default is `lead runs`.

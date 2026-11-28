@@ -125,12 +125,14 @@ def sensitive_path(path, tid, brief=None, symlinks=()):
              any(part.casefold() == '.agents' for part in Path(path).parts)))
 
 
-def sensitive_paths(root, base, head, tid, brief=None, cache=None):
+def sensitive_paths(root, base, head, tid, brief=None, cache=None, trusted=None):
+    """Sensitive paths changed in base..head; with trusted (a default-branch ref) a merge's diff against a
+    parent on it is not attributed (repo.history_paths)."""
     if cache is None:
         cache = {}
     key = (base, head)
     if key not in cache:
-        changed, special = repo.history_paths(root, base, head)
+        changed, special = repo.history_paths(root, base, head, **({'trusted': trusted} if trusted else {}))
         cache[key] = (sorted(changed), special)
     changed, special = cache[key]
     return [path for path in changed if sensitive_path(path, tid, brief, special)]
@@ -165,17 +167,55 @@ def sensitive_review_base(root, t, head, main=None):
     return seams.adapter_for(t.get('executor')).sensitive_review_base(root, t, head, main)
 
 
+def review_main(root, t, main=None):
+    """The default branch the review trusts: --main, the task's main, config main / origin/HEAD, else the primary
+    checkout's branch (stale_base_main); None when none resolves."""
+    return known_main(root, main or t.get('main')) or stale_base_main(root)
+
+
+def trusted_ref(root, t, main=None):
+    main = review_main(root, t, main)
+    return 'refs/heads/' + main if main else None
+
+
+MAIN_FORK_SCAN_LIMIT = 200  # first-parent main commits after the review base that main_fork_review_base checks
+
+
+def main_side_fork(root, t, base, head, main):
+    """Newest commit of main's own first-parent history after base that head contains and that contains neither
+    head nor a delivery recorded for t: up to there, base..fork holds only commits made on main, never executor work
+    that was merged or fast-forwarded into main. None when there is none within MAIN_FORK_SCAN_LIMIT."""
+    chain = seams.git('rev-list', '--first-parent', '--max-count={}'.format(MAIN_FORK_SCAN_LIMIT),
+                      base + '..refs/heads/' + main, check=False, cwd=root).split()
+    deliveries = [head] + [t[key] for key in ('head', 'verified_head', 'replaced_head')
+                           if isinstance(t.get(key), str) and SHA_RE.fullmatch(t[key]) and commit_known(root, t[key])]
+    for commit in chain:
+        if not SHA_RE.fullmatch(commit) or any(ancestor(sha, commit, root) for sha in deliveries):
+            continue
+        if ancestor(commit, head, root):
+            return commit if ancestor(base, commit, root) else None
+    return None
+
+
 def main_fork_review_base(root, t, head, main=None):
-    """The older of the recorded review base (earlier unpassed attempts or the assignment base) and the fork
-    from main, so every commit not yet in main is reviewed."""
+    """Start of the reviewed range: every commit not yet on main, and none of main's own commits.
+
+    The worktree may fast-forward to, merge or rebase onto main after assign (as stale_base: refuse asks): the range
+    then starts at main_side_fork, so the lead's commits on main are never attributed to the executor. Otherwise it is
+    the older of the recorded review base (earlier unpassed attempts or the assignment base) and the fork from main,
+    so a base not on main (an unmerged predecessor, a --follows chain) and executor commits already merged into main
+    are still reviewed."""
     base = t.get('review_base') or t.get('base')
-    main = known_main(root, main or t.get('main'))
+    main = review_main(root, t, main)
     fork = seams.git('merge-base', head, 'refs/heads/' + main, check=False, cwd=root).strip() if main else ''
     fork = fork if SHA_RE.fullmatch(fork) else None
     if not base or not fork or base == fork:
         return base or fork
     if not commit_known(root, base):
         return base  # sensitive_review reports a base missing from this repository.
+    own = main_side_fork(root, t, base, head, main)
+    if own:
+        return own
     older = seams.git('merge-base', base, fork, check=False, cwd=root).strip()
     return older if SHA_RE.fullmatch(older) else base
 
@@ -193,7 +233,7 @@ def sensitive_review(root, t, a, head, event, base, replacing=None):
               file=sys.stderr)
     else:
         cache = {}
-        hits = sensitive_paths(root, base, head, a.id, brief=brief, cache=cache)
+        hits = sensitive_paths(root, base, head, a.id, brief=brief, cache=cache, trusted=trusted_ref(root, t))
         special = cache[(base, head)][1]
     adapter = seams.adapter_for(t.get('executor'))
     if hits:

@@ -8,7 +8,7 @@ disable-model-invocation: true
 
 # Executor queue
 
-version: 3.7.0
+version: 3.8.0
 ## Decide and prepare
 
 Use the project's ledger/queue if AGENTS.md or CLAUDE.md defines one. Use xq only when none exists.
@@ -26,7 +26,7 @@ State is shared across worktrees via the main checkout's `.agents/ledger.jsonl` 
 ## Common contract
 
 Write `.agents/briefs/<id>.md`: goal, allowed input/output files, checks, forbidden actions, tracked notes path. Shape: one `Result:` line, few numbered steps, final `## Acceptance` with `Files:`/`Checks:`/`Notes:`;
-run `xq.py brief-lint --brief <brief>` before every assign (config `brief_lint` makes assign warn or, with mode enforce, refuse unless `--force`).
+run `xq.py brief-lint --brief <brief>` before every assign (config `brief_lint` makes assign warn or, with mode enforce, refuse unless `--force`; `shape_mode` sets this for the one-Result/final-Acceptance shape rules alone).
 IDs: 1–120 ASCII letters/digits/dot/underscore/hyphen, starting with a letter/digit; casefold collisions refuse. Use fresh IDs on retry.
 Every Codex brief must say: “Read and write only in this worktree; do not open `.env*`, `~/.ssh`, `~/.config`,
 or the main checkout. If a key is needed, report blocked.” This is an instruction boundary, not OS read isolation.

@@ -13,7 +13,7 @@ import tempfile
 from ..core import paths, seams
 from ..core.repo import ancestor, commit_known, known_main, resolve_commit, same_worktree, task_brief
 from ..core.review import (print_reports, scope_findings, sensitive_path, sensitive_paths, sensitive_review_base,
-                           sensitive_warning, stale_base_main)
+                           sensitive_warning, stale_base_main, trusted_ref)
 from ..core.util import display_name, fail, listed_paths, SHA_RE
 from ..port import runner
 from ..port.runner import open_process, worktree_env, worktree_git, WORKTREE_GIT_CONFIG
@@ -412,7 +412,8 @@ def codex_done_report(root, task, found, out=None):
     lines = []
     if base and tip and tip != base and not runner.run(['git', 'cat-file', '-e', base + '^{commit}'], cwd=root).returncode:
         cache = {}
-        committed = sensitive_paths(root, base, tip, tid, brief=brief, cache=cache)
+        committed = sensitive_paths(root, base, tip, tid, brief=brief, cache=cache,
+                                    trusted=trusted_ref(root, task))
         lines += [sensitive_warning(path, cache[(base, tip)][1]) for path in committed]
     lines += [sensitive_warning(path) for path in worktree_sensitive(root, dict(task, id=tid), found['scan'], brief)]
     collected.append((lines, tid + ': '))

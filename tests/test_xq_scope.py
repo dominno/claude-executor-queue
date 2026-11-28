@@ -376,3 +376,117 @@ def test_verify_counts_untracked_paths_of_an_uncommitted_delivery(s, capsys):
     s.cli('finish', '--id', 't1', '--status', 'done')
     paths = s.xq.ADAPTERS['codex'].scope_paths(s.repo, s.xq.state(s.repo)['t1'], s.git('rev-parse', 'HEAD', cwd=wt))
     assert 'stray.txt' in paths
+
+
+def fast_forward_after_assign(s, executor_files):
+    """Assign at base B; the lead commits AGENTS.md on main; the worktree fast-forwards to it; the executor commits."""
+    s.configure(stale_base='refuse', scope_check='enforce')
+    wt = s.worktree()
+    assert s.assign(wt) == 0
+    (s.repo / 'AGENTS.md').write_text('lead rules\n', encoding='utf-8')
+    s.git('add', 'AGENTS.md')
+    s.git('commit', '-q', '-m', 'lead: agent rules')
+    s.git('merge', '-q', '--ff-only', 'main', cwd=wt)
+    s.commit_in(wt, executor_files)
+    assert s.cli('finish', '--id', 't1', '--status', 'done') == 0
+    return wt
+
+
+def test_fast_forward_to_main_does_not_attribute_main_commits(s, capsys):
+    fast_forward_after_assign(s, {'src/app.py': 'x'})
+    capsys.readouterr()
+    assert s.verify() == 0
+    err = capsys.readouterr().err
+    assert 'AGENTS.md' not in err and 'WARN SENSITIVE' not in err and 'WARN SCOPE' not in err
+    event = s.last()
+    assert event['verdict'] == 'pass' and not event.get('sensitive') and 'out_of_scope' not in event
+
+
+def test_fast_forward_to_main_still_flags_executor_sensitive_change(s, capsys):
+    fast_forward_after_assign(s, {'src/app.py': 'x', '.claude/settings.json': '{}'})
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match=r'1 sensitive path\(s\): \.claude/settings\.json; inspect'):
+        s.verify('--accept-scope', 'settings reviewed')
+    assert 'AGENTS.md' not in capsys.readouterr().err
+    assert s.verify('--ack-sensitive', '--accept-scope', 'settings reviewed') == 0
+    assert s.last()['sensitive'] == ['.claude/settings.json']
+
+
+def test_fast_forward_to_configured_main_is_not_attributed(s, capsys):
+    s.git('branch', 'trunk')
+    s.git('checkout', '-q', 'trunk')
+    s.configure(main='trunk', stale_base='refuse', scope_check='enforce')
+    wt = s.worktree()
+    assert s.assign(wt) == 0
+    (s.repo / 'CLAUDE.md').write_text('lead\n', encoding='utf-8')
+    s.git('add', 'CLAUDE.md')
+    s.git('commit', '-q', '-m', 'lead on trunk')
+    s.git('merge', '-q', '--ff-only', 'trunk', cwd=wt)
+    s.commit_in(wt, {'src/app.py': 'x'})
+    assert s.cli('finish', '--id', 't1', '--status', 'done') == 0
+    capsys.readouterr()
+    assert s.verify() == 0
+    err = capsys.readouterr().err
+    assert 'CLAUDE.md' not in err and 'WARN SCOPE' not in err
+
+
+def test_follows_chain_still_reviews_unmerged_predecessor_after_main_merge(s, capsys):
+    s.configure(stale_base='refuse')
+    wt = s.worktree()
+    assert s.assign(wt) == 0
+    s.commit_in(wt, {'.github/workflows/ci.yml': 'on: push'})
+    assert s.cli('finish', '--id', 't1', '--status', 'failed') == 0
+    (s.repo / 'AGENTS.md').write_text('lead rules\n', encoding='utf-8')
+    s.git('add', 'AGENTS.md')
+    s.git('commit', '-q', '-m', 'lead: agent rules')
+    s.git('merge', '-q', '--no-edit', 'main', cwd=wt)
+    assert s.cli('assign', '--id', 't2', '--executor', 'codex', '--brief', s.brief(), '--worktree', str(wt),
+                 '--follows', 't1') == 0
+    s.commit_in(wt, {'src/app.py': 'x'})
+    assert s.cli('finish', '--id', 't2', '--status', 'done') == 0
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match=r'1 sensitive path\(s\): \.github/workflows/ci\.yml; inspect'):
+        s.cli('verify', '--id', 't2', '--by', 'reader', '--verdict', 'pass', '--evidence', 'ran')
+    assert 'AGENTS.md' not in capsys.readouterr().err
+
+
+def merge_main_mid_task(s, evil=None):
+    s.configure(stale_base='refuse')
+    wt = s.worktree()
+    assert s.assign(wt) == 0
+    s.commit_in(wt, {'src/app.py': 'x'})
+    (s.repo / 'AGENTS.md').write_text('lead rules\n', encoding='utf-8')
+    s.git('add', 'AGENTS.md')
+    s.git('commit', '-q', '-m', 'lead: agent rules')
+    s.git('merge', '-q', '--no-ff', '--no-commit', 'main', cwd=wt)
+    if evil:
+        (wt / evil).parent.mkdir(parents=True, exist_ok=True)
+        (wt / evil).write_text('{}', encoding='utf-8')
+        s.git('add', evil, cwd=wt)
+    s.git('commit', '-q', '-m', 'merge main', cwd=wt)
+    assert s.cli('finish', '--id', 't1', '--status', 'done') == 0
+
+
+def test_merge_of_main_mid_task_is_not_attributed(s, capsys):
+    merge_main_mid_task(s)
+    capsys.readouterr()
+    assert s.verify() == 0
+    err = capsys.readouterr().err
+    assert 'WARN SENSITIVE' not in err and 'WARN SCOPE' not in err
+
+
+def test_change_made_inside_a_merge_of_main_is_still_sensitive(s, capsys):
+    merge_main_mid_task(s, evil='.claude/settings.json')
+    with pytest.raises(SystemExit, match=r'1 sensitive path\(s\): \.claude/settings\.json; inspect'):
+        s.verify('--accept-scope', 'reviewed')
+    assert 'AGENTS.md' not in capsys.readouterr().err
+
+
+def test_executor_commit_fast_forwarded_into_main_before_review_is_still_sensitive(s, capsys):
+    wt = s.worktree()
+    assert s.assign(wt) == 0
+    s.commit_in(wt, {'.claude/settings.json': '{}'})
+    assert s.cli('finish', '--id', 't1', '--status', 'done') == 0
+    s.git('merge', '-q', '--ff-only', 'xq/wt')  # the lead integrates before reviewing
+    with pytest.raises(SystemExit, match=r'1 sensitive path\(s\): \.claude/settings\.json; inspect'):
+        s.verify('--accept-scope', 'reviewed')

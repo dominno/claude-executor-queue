@@ -1,8 +1,43 @@
 # Changelog
 
+## v3.8 — 3.8.0 — 2026-11-28
+
+### Fixed: review after updating a worktree to main
+- `verify --verdict pass` (and the `WARN SENSITIVE` lines of `poll`/`finish`) no longer attribute the default branch's
+  own commits to the executor. After `assign`, a worktree that fast-forwards to, merges or rebases onto main (as
+  `stale_base: refuse` asks) is reviewed from the newest commit of main's first-parent history after the review
+  base that the head contains and that contains neither the head nor a recorded delivery of the task, so a lead
+  commit on main touching `AGENTS.md`, `CLAUDE.md` or `.claude/settings.json` needs no `--ack-sensitive`. Without
+  such a commit the range is unchanged (the older of the review base and the fork from main), so an unmerged
+  predecessor, a `--follows` chain and executor commits merged or fast-forwarded into main before review are still
+  reviewed. A merge commit with a parent on main is diffed only against that parent: a change made inside the merge
+  itself still counts. The `WARN SCOPE` check starts from the same base. Main resolves as before (`--main`, config
+  `main`, origin/HEAD) and now falls back to the primary checkout's branch, as the stale-base check does.
+
+### Added
+- `brief_lint.shape_mode` (`off|warn|enforce`; default: the value of `mode`, so existing configs behave as before)
+  governs only the shape rules (exactly one `Result:` line; one final `## Acceptance` with `Files:`, `Checks:` and
+  `Notes:`); `mode` keeps the other rules. `{"mode": "warn", "shape_mode": "enforce"}` makes `assign` refuse a
+  multi-result brief (unless `--force`) while restricted words only warn. Under `shape_mode: enforce`,
+  `brief-lint` prints `brief_lint shape_mode is enforce: split the brief into one brief per Result: line, ...` and
+  exits 1 on a shape error whatever `mode` is; `brief-lint --json` adds `shape_errors` (additive).
+- `doctor` marks a private path that a newer version added and an older `init` did not exclude:
+  `MISSING <path>: not ignored (new in <version>; run xq init after updating) -> next: run xq init ...`.
+
+### Docs
+- `references/codex.md`: the Codex launch steps show `compose --brief ... [--context <repo file>]...`, as `SKILL.md`
+  does; "Brief lint" documents `shape_mode`; the review-range text describes the fork rule.
+- `references/installation.md`: new "After updating" step: run `xq.py init` (idempotent) and then `xq.py doctor`.
+
+### Upgrade
+- After updating the skill, run `xq.py init` and then `xq.py doctor`; `init` adds only the missing exclusions.
+
 ## v3.7 — 3.7.0 — 2026-11-28
 
 Everything below, including the earlier Unreleased entries, ships as 3.7.0.
+
+Upgrade: 3.7.0 adds the private `.agents/hook-idle.stamp`. After updating, run `xq.py init` (idempotent) and then
+`xq.py doctor`; until then doctor reports `MISSING /.agents/hook-idle.stamp: not ignored`.
 
 ### Added: out-of-the-box adoption
 - `preflight --executor codex --worktree <primary checkout>` refuses with the message `assign` gives (`Codex must not

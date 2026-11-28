@@ -56,6 +56,19 @@ For cloud work, use `init` so the brief and status files can be tracked. `init -
 
 The task ledger and optional project hooks stay in the project after skill removal.
 
+### After updating
+
+A newer helper can add private files (for example `.agents/hook-idle.stamp`, new in 3.7.0) that an older `init` did
+not exclude from Git. After every update, run from the primary checkout:
+
+```sh
+python3 "$xq" init      # idempotent: adds only the missing exclusions
+python3 "$xq" doctor    # every private path should print OK ... ignored and untracked
+```
+
+Until `init` runs again, `doctor` prints `MISSING <path>: not ignored (new in <version>; run xq init after updating)`
+for such a path.
+
 ## Moving from the old installer
 
 Versions up to 3.6 shipped `install.sh` and `install.ps1`, which copied three files into `~/.claude/skills/executor-queue` (or `CLAUDE_SKILLS_DIR`) and wrote `.executor-queue-install.json` beside it. Those installers are gone. Back up any local edits, delete that directory and its `.executor-queue-install.json`, then install with the Skills CLI. Update any Stop hook that points to the previous helper path.

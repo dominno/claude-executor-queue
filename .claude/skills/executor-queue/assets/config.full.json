@@ -13,6 +13,7 @@
   ],
   "brief_lint": {
     "mode": "warn",
+    "shape_mode": "warn",
     "restricted": [],
     "handoff_marker": "lead runs",
     "fields": {},

@@ -61,8 +61,9 @@ No executor receives permission for paid calls, network, push or merge merely by
    ```
    Pass the same `--model` to the companion task and to `xq.py assign`. `--worktree` adds the
    [stale-base](#stale-base) admission to preflight; `assign --worktree` repeats it.
-   With `context_files` configured, launch the composed prompt instead of the bare brief
-   ([context preamble](#context-preamble)): `python3 "$xq" compose --brief .agents/briefs/<id>.md`, then
+   With `context_files` configured (or per-task context files), launch the composed prompt instead of the bare
+   brief ([context preamble](#context-preamble)):
+   `python3 "$xq" compose --brief .agents/briefs/<id>.md [--context <repo file>]...`, then
    `--prompt-file "$root/.agents/review/<id>.prompt.md"` and `assign ... --prompt .agents/review/<id>.prompt.md`.
    `--prompt-file` is resolved relative to `--cwd`: always pass an absolute existing path to the current brief.
    Record the returned jobId and absolute worktree immediately. Before launch, optional `assign --queued` records a
@@ -187,9 +188,16 @@ No executor receives permission for paid calls, network, push or merge merely by
    The review base is the assignment base, or the oldest base of earlier unpassed Codex attempts (open, or closed
    `dropped`/`superseded-by`) whose base is an ancestor of the new assignment base, whatever their worktree: a fix
    attempt inherits it (`assign --follows <id>`, or automatically with `NOTE review base inherited from <id>`), so
-   the sensitive review also covers the earlier attempts' commits. When main is known (config `main` or
-   origin/HEAD), the review also starts no later than `merge-base(head, main)`, so every commit not yet in main is
-   reviewed; a new base already contained in main inherits nothing. `--follows` accepts a predecessor in another
+   the sensitive review also covers the earlier attempts' commits. When main is known (config `main`, origin/HEAD,
+   else the primary checkout's branch), the review covers the commits not yet on main and none of main's own: when
+   the worktree fast-forwarded to, merged or rebased onto main after assign (as `stale_base: refuse` asks), it starts
+   at the newest commit of main's first-parent history after the review base that the head contains and that
+   contains neither the head nor a recorded delivery of the task (at most 200 are checked). Otherwise it starts at
+   the older of the review base and `merge-base(head, main)`, so an unmerged predecessor, a `--follows` chain and
+   executor commits the lead merged or fast-forwarded into main before reviewing are still covered. An `AGENTS.md`
+   or `.claude/settings.json` change the lead made on main is never listed as an executor change, and a merge commit
+   with a parent on main is diffed only against that parent, so a change made inside the merge itself is still
+   listed. A new base already contained in main inherits nothing. `--follows` accepts a predecessor in another
    worktree when that worktree is gone or its base is an ancestor of the new HEAD.
    Codex tasks must not run in the primary checkout (`--force` records `primary_checkout` and reviews xq's own
    state there as untrusted) nor in a worktree another Codex task is running in; launch `<id>-fixN` only after
@@ -337,28 +345,38 @@ info string, so a ```` block may contain ``` lines) and reports:
   outside Acceptance (split the task).
 
 Exit 0 with warnings only, 1 on errors (and with `--enforce`, on warnings too), 2 on usage errors. `--json` prints
-`{"version":1,"brief":...,"ok":...,"errors":[...],"warnings":[...]}`. Configure it in `.agents/config.json`
+`{"version":1,"brief":...,"ok":...,"errors":[...],"warnings":[...],"shape_errors":[...]}`, where `shape_errors` is the
+subset of `errors` from the shape rules (below). Configure it in `.agents/config.json`
 (all keys optional; generic defaults shown):
 
 ```json
-{"brief_lint": {"mode": "warn", "restricted": [], "handoff_marker": "lead runs", "fields": {},
+{"brief_lint": {"mode": "warn", "shape_mode": "warn", "restricted": [], "handoff_marker": "lead runs", "fields": {},
                 "result_max_words": 45, "max_steps": 4, "notes_require_file": false}}
 ```
+
+The **shape rules** are exactly one `Result:` line and one final `## Acceptance` section with nonempty `Files:`,
+`Checks:` and `Notes:` (no Acceptance, several, not last, a missing or placeholder label). `shape_mode` (`off`, `warn`
+or `enforce`; default: the value of `mode`, so existing configs behave as before) governs only them at `assign`;
+`mode` governs the other rules (placeholder Result, `Files:` entries, restricted words, `fields`,
+`notes_require_file`, and the `result_max_words`/`max_steps` warnings). So `{"mode": "warn", "shape_mode":
+"enforce"}` refuses a brief with two `Result:` lines at assign while restricted words only warn. Under `shape_mode:
+enforce`, `brief-lint` also prints `brief_lint shape_mode is enforce: split the brief into one brief per Result:
+line, ...` after a shape error and exits 1, whatever `mode` is.
 
 `restricted` lists project words such as `"network"` or `"git commit"` (matched case-insensitively as whole words);
 a line naming one must also contain `handoff_marker` (for example "lead runs the network fetch"). `fields` maps a
 header name to its allowed values, for example `{"Domain": ["api", "ui"]}`. `assign` lints the brief only when
-`brief_lint` is present: `warn` prints `brief-lint: WARN ...` lines to stderr and never changes the exit code,
-`enforce` refuses a brief with errors unless `--force` (recorded as `force` in the ledger), `off` is silent.
+`brief_lint` is present, per rule group (`shape_mode` for the shape rules, `mode` for the rest): `warn` prints
+`brief-lint: WARN ...` lines to stderr and never changes the exit code, `enforce` refuses a brief with errors of that
+group unless `--force` (recorded as `force` in the ledger), `off` is silent for that group.
 Without the key `assign` stays silent, so existing projects see no change; the command itself always lints.
 
 ## Declared scope
 
 When a Codex task's brief declares `Files:` in its final `## Acceptance` (see [brief lint](#brief-lint)), xq compares
 the delivery with it in code. The delivered paths are `git diff --name-only --no-renames <review base> <head>` over
-the same range the SENSITIVE review uses (the recorded review base or the fork from main, whichever is older), started
-instead at the current fork from the default branch when main was merged or rebased in mid-task (changes already on
-main are not the delivery's), plus the worktree's uncommitted, index-hidden and untracked paths when the worktree
+the same range the SENSITIVE review uses (see the review base above), started instead at the current fork from the
+default branch when main was merged or rebased in mid-task (changes already on main are not the delivery's), plus the worktree's uncommitted, index-hidden and untracked paths when the worktree
 still exists (after it is removed, only the committed range). At verify, untracked paths past a clean delivery
 commit (caches or build output from the lead's own checks) are left out, as `finish` already treats them; they
 count only while the delivery is uncommitted and the verified head is the worktree HEAD. A path is in scope when one declared entry matches it:

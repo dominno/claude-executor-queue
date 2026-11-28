@@ -367,3 +367,21 @@ def test_status_field_state_and_unknown_id(o, capsys):
     proc = subprocess.run([sys.executable, str(helper), 'status', '--id', 'nope'], capture_output=True, text=True,
                           timeout=30)
     assert proc.returncode == 1 and proc.stderr.strip() == 'xq: unknown id nope'
+
+
+def test_doctor_names_a_private_path_new_since_the_last_init(o, capsys):
+    (o.repo / '.gitignore').write_text('', encoding='utf-8')
+    assert o.cli('init') == 0
+    exclude = o.repo / '.git/info/exclude'
+    lines = exclude.read_text(encoding='utf-8').split('\n')
+    exclude.write_text('\n'.join(line for line in lines if line != '/.agents/hook-idle.stamp'), encoding='utf-8')
+    capsys.readouterr()
+    o.cli('doctor', '--offline', '--need', 'agy')
+    out = capsys.readouterr().out
+    assert ('MISSING /.agents/hook-idle.stamp: not ignored (new in 3.7.0; run xq init after updating) -> next: run '
+            'xq init') in out
+    assert 'MISSING /.agents/review/' not in out
+    assert o.cli('init') == 0
+    capsys.readouterr()
+    o.cli('doctor', '--offline', '--need', 'agy')
+    assert 'hook-idle.stamp' not in capsys.readouterr().out.replace('OK /.agents/hook-idle.stamp', '')
